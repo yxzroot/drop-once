@@ -8,7 +8,11 @@ Download the archive for your computer from the [latest release](https://github.
 
 1. Put both devices on the **same Wi-Fi or LAN** (a personal hotspot works too). Complete the [one-time HTTPS certificate setup](#encrypted-transfer-and-phone-setup) before scanning a link.
 2. Open DropOnce. Choose **File** or **Text** to send from the computer, or **Receive** to accept one file into a folder you select.
-3. Choose **Same Wi-Fi / LAN**, select the computer's address on that network, and create the link. Scan the QR code on your phone. To receive on your computer, select the file in the phone's browser and tap **Send file**; wait for **Sent!** on the phone and **Received!** on the computer.
+3. Choose **Same Wi-Fi / LAN**, select the computer's network adapter, and create the link. Click **Show QR code** to scan with your phone, or click **Copy link** to share it. To receive on your computer, select the file in the phone's browser and tap **Send file**; wait for **Sent!** on the phone and **Received!** on the computer.
+
+**Screen privacy:** DropOnce masks parts of the IP address and token in the window, and keeps the QR hidden until you click **Show QR code** (it hides again after 45 seconds). The copied link and the revealed QR **must contain the complete address and token** so the other device can connect. Masking the screen does not hide your local address from the recipient or other devices on your network. The clipboard is cleared when a share stops, but another app may have read it before then.
+
+Choose **System**, **Dark**, **Light**, or **Ocean** in the appearance selector at the top. Your choice is saved for the next launch.
 
 ## iPhone over a USB cable
 

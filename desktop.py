@@ -10,7 +10,7 @@ import psutil
 import qrcode
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
                               QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -55,6 +55,12 @@ def possible_iphone_tether(address, interface):
             or ipaddress.ip_address(address) in ipaddress.ip_network("172.20.10.0/28"))
 
 
+def masked_address(address):
+    """Keep enough context to distinguish adapters without displaying a full IP."""
+    parts = address.split(".")
+    return f"{parts[0]}.•••.•••.{parts[-1]}" if len(parts) == 4 else "•••"
+
+
 def qr_image(url, size=260):
     code = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M,
                          box_size=1, border=4)
@@ -77,36 +83,65 @@ def qr_image(url, size=260):
     return image
 
 
+PALETTES = {
+    "dark": dict(bg="#0b111d", card="#151f30", field="#0d1725", text="#f4f8ff",
+                 muted="#adbbce", border="#33465c", accent="#85e8d3", accent_text="#09231e",
+                 hover="#273c50", badge="#203d3b"),
+    "light": dict(bg="#edf2f8", card="#ffffff", field="#f5f8fc", text="#14273a",
+                  muted="#526579", border="#c7d5e3", accent="#087d74", accent_text="#ffffff",
+                  hover="#e3eef2", badge="#def2ee"),
+    "ocean": dict(bg="#061b2e", card="#0b2a40", field="#082238", text="#eefcff",
+                  muted="#a4c9d3", border="#286075", accent="#54e0dd", accent_text="#032532",
+                  hover="#164158", badge="#15525a"),
+}
+
+
 STYLE = """
-QWidget { background: #0d1420; color: #ecf4ff; font: 13px 'Inter', 'Noto Sans', sans-serif; }
-QFrame#card { background: #172335; border: 1px solid #31435b; border-radius: 20px; }
-QFrame#card QLabel { background: transparent; }
-QFrame#drop { background: #101b2b; border: 2px dashed #47617c; border-radius: 16px; }
-QFrame#drop:hover { border-color: #81e6d1; }
+QWidget { background: $bg; color: $text; font: 13px 'Inter', 'Noto Sans', sans-serif; }
+QFrame#card { background: $card; border: 1px solid $border; border-radius: 22px; }
+QFrame#card QLabel, QWidget#formContents, QWidget#footerContents,
+QWidget#filePage, QWidget#receivePage, QStackedWidget#inputStack { background: transparent; }
+QFrame#drop { background: $field; border: 2px dashed $border; border-radius: 16px; }
+QFrame#drop:hover { border-color: $accent; }
 QFrame#drop QLabel { background: transparent; }
-QScrollArea { border: none; background: transparent; }
-QScrollArea#formScroll, QWidget#formContents { background: transparent; }
+QFrame#qrWell { background: $field; border: 1px solid $border; border-radius: 20px; }
+QFrame#qrWell QLabel { background: transparent; }
+QScrollArea, QScrollArea#formScroll { border: none; background: transparent; }
+QScrollArea#formScroll QWidget#qt_scrollarea_viewport { background: transparent; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 5px 0; }
-QScrollBar::handle:vertical { background: #405571; border-radius: 4px; min-height: 28px; }
+QScrollBar::handle:vertical { background: $border; border-radius: 4px; min-height: 28px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QLabel#eyebrow { color: #81e6d1; font-size: 11px; font-weight: 700; }
-QLabel#headline { font-size: 31px; font-weight: 800; }
-QLabel#heading { font-size: 19px; font-weight: 750; }
-QLabel#muted { color: #b1c0d2; }
+QLabel#eyebrow, QLabel#section { color: $accent; font-size: 11px; font-weight: 800; }
+QLabel#headline { font-size: 33px; font-weight: 800; }
+QLabel#heading { font-size: 20px; font-weight: 750; }
+QLabel#muted { color: $muted; }
+QLabel#pill { color: $accent; background: $badge; padding: 8px 13px; border-radius: 12px; font-weight: 700; }
+QLabel#accentGlyph { color: $accent; font-size: 29px; }
 QLabel#qr { background: transparent; border-radius: 12px; }
 QPushButton, QComboBox, QLineEdit, QPlainTextEdit {
-  color: #ecf4ff; background: #101b2b; border: 1px solid #405571; border-radius: 11px;
+  color: $text; background: $field; border: 1px solid $border; border-radius: 11px;
   padding: 10px 13px; min-height: 22px;
 }
 QPushButton { font-weight: 700; }
-QPushButton:hover { border-color: #81e6d1; background: #24364b; }
-QPushButton:disabled { color: #8292a6; border-color: #31435b; }
-QPushButton#primary { background: #81e6d1; color: #0a1a22; border-color: #81e6d1; }
-QPushButton#primary:hover { background: #b4ffed; }
-QPushButton#switch:checked { background: #81e6d1; color: #0a1a22; border-color: #81e6d1; }
-QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border-color: #81e6d1; }
-QComboBox QAbstractItemView { background: #172335; color: #ecf4ff; selection-background-color: #405571; }
+QPushButton:hover { border-color: $accent; background: $hover; }
+QPushButton:disabled { color: $muted; border-color: $border; }
+QPushButton#primary, QPushButton#switch:checked {
+  background: $accent; color: $accent_text; border-color: $accent;
+}
+QPushButton#primary:hover, QPushButton#switch:checked:hover {
+  background: $accent; color: $accent_text; border-color: $accent;
+}
+QPushButton#secondary { background: $badge; color: $accent; }
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border-color: $accent; }
+QComboBox QAbstractItemView { background: $card; color: $text; selection-background-color: $hover; }
 """
+
+
+def theme_stylesheet(theme):
+    style = STYLE
+    for name in sorted(PALETTES[theme], key=len, reverse=True):
+        style = style.replace(f"${name}", PALETTES[theme][name])
+    return style
 
 
 class FileDrop(QFrame):
@@ -116,13 +151,13 @@ class FileDrop(QFrame):
         super().__init__()
         self.setObjectName("drop")
         self.setAcceptDrops(True)
-        self.setMinimumHeight(155)
+        self.setMinimumHeight(128)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 12, 10, 12)
         layout.setSpacing(3)
         art = QLabel("⇣")
         art.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        art.setStyleSheet("color:#81e6d1;font-size:29px")
+        art.setObjectName("accentGlyph")
         layout.addWidget(art)
         title = QLabel("Drop one file here")
         title.setObjectName("heading")
@@ -155,21 +190,55 @@ class FileDrop(QFrame):
 
 
 class DropOnce(QMainWindow):
+    def effective_theme(self):
+        if self.theme == "system":
+            return "light" if QApplication.styleHints().colorScheme() == Qt.ColorScheme.Light else "dark"
+        return self.theme
+
+    def apply_theme(self):
+        selected = self.effective_theme()
+        self.setStyleSheet(theme_stylesheet(selected))
+        if hasattr(self, "file_mode"):
+            self.refresh_mode_style()
+
+    def refresh_mode_style(self):
+        palette = PALETTES[self.effective_theme()]
+        for button in (self.file_mode, self.text_mode, self.receive_mode):
+            if button.isChecked():
+                button.setStyleSheet("QPushButton { background: %s; color: %s; border-color: %s; }"
+                                     % (palette["accent"], palette["accent_text"], palette["accent"]))
+            else:
+                button.setStyleSheet("")
+
+    def change_theme(self):
+        self.theme = self.theme_picker.currentData()
+        self.settings.setValue("theme", self.theme)
+        self.apply_theme()
+
+    def system_theme_changed(self):
+        if self.theme == "system":
+            self.apply_theme()
+
     def __init__(self):
         super().__init__()
         self.share = None
         self.file = None
         self.destination = None
+        self.settings = QSettings("DropOnce", "DropOnce")
+        self.theme = str(self.settings.value("theme", "system"))
+        if self.theme not in ("system", *PALETTES):
+            self.theme = "system"
+        self.qr_visible = False
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("DropOnce · One link. One transfer.")
-        self.resize(1060, 700)
+        self.resize(1080, 730)
         self.setMinimumSize(710, 660)
-        self.setStyleSheet(STYLE)
+        self.apply_theme()
         root = QWidget()
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(28, 24, 28, 20)
-        outer.setSpacing(18)
+        outer.setContentsMargins(26, 20, 26, 16)
+        outer.setSpacing(14)
         header = QHBoxLayout()
         intro = QVBoxLayout()
         intro.setSpacing(3)
@@ -179,10 +248,26 @@ class DropOnce(QMainWindow):
         logo = QLabel("DropOnce.")
         logo.setObjectName("headline")
         intro.addWidget(logo)
+        subtitle = QLabel("One link. One transfer. Yours to control.")
+        subtitle.setObjectName("muted")
+        intro.addWidget(subtitle)
         header.addLayout(intro, 1)
-        badge = QLabel("●  ENCRYPTED HTTPS · NO CLOUD")
-        badge.setObjectName("eyebrow")
-        header.addWidget(badge)
+        header_actions = QVBoxLayout()
+        header_actions.setSpacing(6)
+        badge = QLabel("●  ENCRYPTED · NO CLOUD")
+        badge.setObjectName("pill")
+        header_actions.addWidget(badge, alignment=Qt.AlignmentFlag.AlignRight)
+        self.theme_picker = QComboBox()
+        self.theme_picker.addItem("System theme", "system")
+        self.theme_picker.addItem("Dark", "dark")
+        self.theme_picker.addItem("Light", "light")
+        self.theme_picker.addItem("Ocean", "ocean")
+        self.theme_picker.setAccessibleName("Appearance theme")
+        self.theme_picker.setToolTip("Choose the appearance of DropOnce")
+        self.theme_picker.setCurrentIndex(self.theme_picker.findData(self.theme))
+        self.theme_picker.currentIndexChanged.connect(self.change_theme)
+        header_actions.addWidget(self.theme_picker)
+        header.addLayout(header_actions)
         outer.addLayout(header)
 
         body = QHBoxLayout()
@@ -196,11 +281,11 @@ class DropOnce(QMainWindow):
         form.setObjectName("formContents")
         controls = QVBoxLayout(form)
         controls.setContentsMargins(20, 16, 20, 16)
-        controls.setSpacing(9)
-        heading = QLabel("What would you like to do?")
+        controls.setSpacing(7)
+        heading = QLabel("Make a transfer")
         heading.setObjectName("heading")
         controls.addWidget(heading)
-        caption = QLabel("Send a file or text, or receive a file. Anyone with the link on this network can use it.")
+        caption = QLabel("Send something from this computer, or receive a file from your phone.")
         caption.setObjectName("muted")
         caption.setWordWrap(True)
         controls.addWidget(caption)
@@ -220,7 +305,9 @@ class DropOnce(QMainWindow):
         self.receive_mode.clicked.connect(self.show_receive)
         controls.addLayout(switch)
         self.inputs = QStackedWidget()
+        self.inputs.setObjectName("inputStack")
         file_page = QWidget()
+        file_page.setObjectName("filePage")
         file_layout = QVBoxLayout(file_page)
         file_layout.setContentsMargins(0, 0, 0, 0)
         self.drop = FileDrop()
@@ -235,6 +322,7 @@ class DropOnce(QMainWindow):
         self.text_input.setPlaceholderText("Paste a message, link, or note…")
         self.inputs.addWidget(self.text_input)
         receive_page = QWidget()
+        receive_page.setObjectName("receivePage")
         receive_layout = QVBoxLayout(receive_page)
         receive_layout.setContentsMargins(3, 10, 3, 10)
         receive_layout.setSpacing(12)
@@ -260,7 +348,9 @@ class DropOnce(QMainWindow):
         self.connection_mode.addItems(("Same Wi-Fi / LAN", "iPhone USB Personal Hotspot"))
         self.connection_mode.setAccessibleName("How the iPhone connects")
         self.connection_mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        controls.addWidget(QLabel("CONNECTION"))
+        connection_label = QLabel("CONNECTION")
+        connection_label.setObjectName("section")
+        controls.addWidget(connection_label)
         controls.addWidget(self.connection_mode)
         self.connection_hint = QLabel()
         self.connection_hint.setObjectName("muted")
@@ -271,24 +361,33 @@ class DropOnce(QMainWindow):
         self.network.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.network.setMinimumContentsLength(8)
         self.network.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        controls.addWidget(QLabel("YOUR NETWORK ADDRESS"))
-        network_row = QHBoxLayout()
-        network_row.addWidget(self.network, 1)
-        rescan = QPushButton("↻")
-        rescan.setToolTip("Refresh network addresses")
-        rescan.clicked.connect(self.refresh_networks)
-        network_row.addWidget(rescan)
-        controls.addLayout(network_row)
         self.form_scroll = QScrollArea()
         self.form_scroll.setObjectName("formScroll")
         self.form_scroll.setWidgetResizable(True)
         self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.form_scroll.setWidget(form)
+        self.form_scroll.viewport().setStyleSheet("background: transparent;")
         left_layout.addWidget(self.form_scroll, 1)
         footer = QWidget()
-        footer.setObjectName("formContents")
+        footer.setObjectName("footerContents")
         footer_layout = QVBoxLayout(footer)
         footer_layout.setContentsMargins(20, 7, 20, 16)
+        footer_layout.setSpacing(8)
+        network_label = QLabel("NETWORK · ADDRESS MASKED")
+        network_label.setObjectName("section")
+        footer_layout.addWidget(network_label)
+        network_row = QHBoxLayout()
+        network_row.addWidget(self.network, 1)
+        rescan = QPushButton("↻")
+        rescan.setToolTip("Refresh network addresses")
+        rescan.setAccessibleName("Refresh network addresses")
+        rescan.clicked.connect(self.refresh_networks)
+        network_row.addWidget(rescan)
+        footer_layout.addLayout(network_row)
+        self.certificate_button = QPushButton("Export phone trust certificate…")
+        self.certificate_button.setToolTip("Install and trust this certificate on your phone before using HTTPS")
+        self.certificate_button.clicked.connect(self.export_certificate)
+        footer_layout.addWidget(self.certificate_button)
         self.start_button = QPushButton("Create one-time link  →")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.start_share)
@@ -300,8 +399,8 @@ class DropOnce(QMainWindow):
         right.setObjectName("card")
         right.setMinimumWidth(295)
         output = QVBoxLayout(right)
-        output.setContentsMargins(21, 21, 21, 21)
-        output.setSpacing(12)
+        output.setContentsMargins(17, 17, 17, 17)
+        output.setSpacing(8)
         self.status = QLabel("Ready when you are")
         self.status.setObjectName("heading")
         output.addWidget(self.status)
@@ -310,22 +409,29 @@ class DropOnce(QMainWindow):
         self.message.setWordWrap(True)
         output.addWidget(self.message)
         output.addStretch()
-        self.code = QLabel("◇")
+        qr_well = QFrame()
+        qr_well.setObjectName("qrWell")
+        qr_well_layout = QVBoxLayout(qr_well)
+        qr_well_layout.setContentsMargins(12, 14, 12, 14)
+        self.code = QLabel("QR hidden\nReveal to scan")
         self.code.setObjectName("qr")
         self.code.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.code.setStyleSheet("color:#81e6d1;font-size:82px")
-        self.code.setFixedSize(274, 274)
-        output.addWidget(self.code, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.code.setWordWrap(True)
+        self.code.setFixedSize(190, 190)
+        qr_well_layout.addWidget(self.code, alignment=Qt.AlignmentFlag.AlignCenter)
+        output.addWidget(qr_well, alignment=Qt.AlignmentFlag.AlignCenter)
         output.addStretch()
+        self.reveal = QPushButton("Show QR code")
+        self.reveal.setObjectName("secondary")
+        self.reveal.setEnabled(False)
+        self.reveal.clicked.connect(self.toggle_qr)
+        output.addWidget(self.reveal)
         self.link = QLineEdit()
         self.link.setReadOnly(True)
-        self.link.setPlaceholderText("A one-time link will appear here")
-        self.link.setAccessibleName("One-time transfer link")
+        self.link.setPlaceholderText("Masked link appears here")
+        self.link.setAccessibleName("Masked one-time transfer link")
+        self.link.setToolTip("The real address and token are hidden. Use Copy link to share it.")
         output.addWidget(self.link)
-        self.certificate_button = QPushButton("Export phone trust certificate…")
-        self.certificate_button.setToolTip("Install and trust this certificate on your phone before using HTTPS")
-        self.certificate_button.clicked.connect(self.export_certificate)
-        output.addWidget(self.certificate_button)
         actions = QHBoxLayout()
         self.copy = QPushButton("Copy link")
         self.copy.setEnabled(False)
@@ -338,7 +444,7 @@ class DropOnce(QMainWindow):
         output.addLayout(actions)
         body.addWidget(right, 1)
         outer.addLayout(body, 1)
-        foot = QLabel("PRIVATE LINK  ·  EXPIRES IN 10 MINUTES  ·  ONE TRANSFER  ·  USE A TRUSTED NETWORK")
+        foot = QLabel("SCREEN MASKED · QR / COPY SHARE REAL ADDRESS · 10 MINUTES · ONE TRANSFER")
         foot.setObjectName("eyebrow")
         foot.setWordWrap(True)
         outer.addWidget(foot)
@@ -347,9 +453,13 @@ class DropOnce(QMainWindow):
         self.ticker.setInterval(250)
         self.ticker.timeout.connect(self.update_status)
         self.ticker.start()
+        self.qr_timer = QTimer(self)
+        self.qr_timer.setSingleShot(True)
+        self.qr_timer.timeout.connect(self.hide_qr)
         self.set_mode(0)
         self.connection_mode.currentIndexChanged.connect(self.change_connection)
         self.network.currentIndexChanged.connect(self.change_network)
+        QApplication.styleHints().colorSchemeChanged.connect(self.system_theme_changed)
         self.refresh_networks()
 
     def set_mode(self, index):
@@ -359,6 +469,7 @@ class DropOnce(QMainWindow):
         self.file_mode.setChecked(index == 0)
         self.text_mode.setChecked(index == 1)
         self.receive_mode.setChecked(index == 2)
+        self.refresh_mode_style()
         self.start_button.setText("Create receive link  →" if index == 2 else "Create one-time link  →")
         if index == 2 and not self.share:
             self.message.setText("Choose a folder, then let your iPhone send one file here.")
@@ -380,7 +491,28 @@ class DropOnce(QMainWindow):
             self.destination_label.setText(str(self.destination))
 
     def copy_link(self):
-        QApplication.clipboard().setText(self.link.text())
+        if self.share and self.share.remaining and not self.share.served:
+            QApplication.clipboard().setText(self.share.url)
+            self.copy.setText("Copied ✓")
+
+    def hide_qr(self):
+        self.qr_timer.stop()
+        self.qr_visible = False
+        self.code.setPixmap(QPixmap())
+        self.code.setText("QR hidden\nReveal to scan" if self.share else "Your QR will appear here")
+        self.reveal.setText("Show QR code")
+
+    def toggle_qr(self):
+        if not self.share:
+            return
+        if self.qr_visible:
+            self.hide_qr()
+        else:
+            self.qr_visible = True
+            self.code.setPixmap(qr_image(self.share.url, 180))
+            self.reveal.setText("Hide QR code")
+            self.qr_timer.start(45_000)
+        self.update_status()
 
     def export_certificate(self):
         address = self.network.currentData()
@@ -417,17 +549,19 @@ class DropOnce(QMainWindow):
     def refresh_networks(self):
         previous = self.network.currentData()
         addresses = lan_addresses()
+        if self.share and previous not in (address for address, _ in addresses):
+            self.stop_share()
         if self.connection_mode.currentIndex() == 1:
             addresses.sort(key=lambda item: not possible_iphone_tether(*item))
         self.network.blockSignals(True)
         self.network.clear()
         for address, interface in addresses:
             hint = " · possible iPhone tether" if possible_iphone_tether(address, interface) else ""
-            self.network.addItem(f"{address}  ·  {interface}{hint}", address)
+            self.network.addItem(f"{masked_address(address)}  ·  {interface}{hint}", address)
             self.network.setItemData(self.network.count() - 1, interface, Qt.ItemDataRole.UserRole + 1)
         if previous:
             index = self.network.findData(previous)
-            if index >= 0 and self.connection_mode.currentIndex() == 0:
+            if index >= 0:
                 self.network.setCurrentIndex(index)
         self.network.blockSignals(False)
         self.start_button.setEnabled(self.network.count() > 0)
@@ -439,6 +573,9 @@ class DropOnce(QMainWindow):
     def change_connection(self):
         if self.share:
             self.stop_share()
+        self.network.blockSignals(True)
+        self.network.clear()
+        self.network.blockSignals(False)
         self.refresh_networks()
 
     def change_network(self):
@@ -477,12 +614,12 @@ class DropOnce(QMainWindow):
         if self.share:
             self.share.stop()
         self.share = new_share
-        self.code.setStyleSheet("")
-        self.code.setPixmap(qr_image(new_share.url))
-        self.link.setText(new_share.url)
+        self.hide_qr()
+        self.link.setText(f"https://{masked_address(address)}:••••/s/••••••")
         self.link.setCursorPosition(0)
-        self.link.setToolTip(new_share.url)
+        self.reveal.setEnabled(True)
         self.copy.setEnabled(True)
+        self.copy.setText("Copy link")
         self.stop.setEnabled(True)
         self.update_status()
 
@@ -497,8 +634,12 @@ class DropOnce(QMainWindow):
             return
         seconds = self.share.remaining
         self.status.setText("Your link is live")
-        direction = "Open on your iPhone and choose one file to upload." if isinstance(self.share, ReceiveServer) \
-            else "Scan with your iPhone to get the file or text."
+        if isinstance(self.share, ReceiveServer):
+            direction = ("Open the link on your iPhone and choose one file to upload." if self.qr_visible else
+                         "Reveal the QR or copy the link to receive a file.")
+        else:
+            direction = ("Scan with your iPhone to get the file or text." if self.qr_visible else
+                         "Reveal the QR or copy the link to share it.")
         connection = "USB Personal Hotspot" if self.connection_mode.currentIndex() == 1 else "the same Wi-Fi"
         self.message.setText(f"{direction} Use {connection}. Install and trust the exported certificate "
                              f"on your phone first. Expires in {seconds // 60}:{seconds % 60:02d}."
@@ -506,16 +647,17 @@ class DropOnce(QMainWindow):
 
     def stop_share(self, checked=False, *, completed=False, expired=False):
         received = self.share.received if isinstance(self.share, ReceiveServer) else None
+        if self.share and QApplication.clipboard().text() == self.share.url:
+            QApplication.clipboard().clear()
         if self.share:
             self.share.stop()
             self.share = None
         self.link.clear()
         self.copy.setEnabled(False)
+        self.copy.setText("Copy link")
         self.stop.setEnabled(False)
-        self.code.clear()
-        self.code.setPixmap(QPixmap())
-        self.code.setText("◇")
-        self.code.setStyleSheet("color:#81e6d1;font-size:82px")
+        self.reveal.setEnabled(False)
+        self.hide_qr()
         self.status.setText(("Received!" if received else "Sent!") if completed else
                             "Link expired" if expired else "Sharing stopped")
         self.message.setText(f"Saved to {received}" if completed and received else
@@ -526,8 +668,8 @@ class DropOnce(QMainWindow):
         self.ticker.stop()
         self.ticker.timeout.disconnect(self.update_status)
         if self.share:
-            self.share.stop()
-            self.share = None
+            self.stop_share()
+        self.qr_timer.stop()
         super().closeEvent(event)
 
 
@@ -536,7 +678,7 @@ if __name__ == "__main__":
     window = DropOnce()
     if "--self-check" in sys.argv:
         assert window.network is not None and window.inputs.count() == 3
-        assert not qr_image("http://127.0.0.1:1234/s/example").isNull()
+        assert not qr_image("https://127.0.0.1:1234/s/example").isNull()
         window.close()
         raise SystemExit(0)
     window.show()
