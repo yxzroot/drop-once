@@ -160,6 +160,7 @@ class DropOnce(QMainWindow):
         self.share = None
         self.file = None
         self.destination = None
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("DropOnce · One link. One transfer.")
         self.resize(1060, 700)
         self.setMinimumSize(710, 660)
@@ -522,6 +523,8 @@ class DropOnce(QMainWindow):
                              "Create a new link whenever you're ready.")
 
     def closeEvent(self, event):
+        self.ticker.stop()
+        self.ticker.timeout.disconnect(self.update_status)
         if self.share:
             self.share.stop()
             self.share = None
