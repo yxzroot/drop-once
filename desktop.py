@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DropOnce — share one file or text message with another device on your LAN."""
+"""DropOnce — send or receive one file over a local network."""
 
 import ipaddress
 from pathlib import Path
@@ -12,9 +12,9 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
                               QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-                              QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+                              QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
-from transfer import ShareServer
+from transfer import ReceiveServer, ShareServer
 
 
 def lan_addresses():
@@ -43,6 +43,13 @@ def lan_addresses():
         return virtual, item[0] != preferred, item[1], item[0]
 
     return sorted(addresses.items(), key=priority)
+
+
+def possible_iphone_tether(address, interface):
+    """Only a hint: hotspot Wi-Fi can use the same IP range as USB tethering."""
+    name = interface.lower()
+    return (any(part in name for part in ("iphone", "apple mobile", "usb", "rndis", "ncm"))
+            or ipaddress.ip_address(address) in ipaddress.ip_network("172.20.10.0/28"))
 
 
 def qr_image(url, size=260):
@@ -74,6 +81,11 @@ QFrame#card QLabel { background: transparent; }
 QFrame#drop { background: #101b2b; border: 2px dashed #47617c; border-radius: 16px; }
 QFrame#drop:hover { border-color: #81e6d1; }
 QFrame#drop QLabel { background: transparent; }
+QScrollArea { border: none; background: transparent; }
+QScrollArea#formScroll, QWidget#formContents { background: transparent; }
+QScrollBar:vertical { background: transparent; width: 8px; margin: 5px 0; }
+QScrollBar::handle:vertical { background: #405571; border-radius: 4px; min-height: 28px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QLabel#eyebrow { color: #81e6d1; font-size: 11px; font-weight: 700; }
 QLabel#headline { font-size: 31px; font-weight: 800; }
 QLabel#heading { font-size: 19px; font-weight: 750; }
@@ -116,6 +128,7 @@ class FileDrop(QFrame):
         hint = QLabel("or browse your computer · up to 2 GiB")
         hint.setObjectName("muted")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setWordWrap(True)
         layout.addWidget(hint)
         browse = QPushButton("Choose file")
         browse.clicked.connect(self.choose_file)
@@ -143,6 +156,7 @@ class DropOnce(QMainWindow):
         super().__init__()
         self.share = None
         self.file = None
+        self.destination = None
         self.setWindowTitle("DropOnce · One link. One transfer.")
         self.resize(1060, 700)
         self.setMinimumSize(710, 660)
@@ -162,7 +176,7 @@ class DropOnce(QMainWindow):
         logo.setObjectName("headline")
         intro.addWidget(logo)
         header.addLayout(intro, 1)
-        badge = QLabel("●  SAME WI-FI · NO CLOUD")
+        badge = QLabel("●  WI-FI OR USB HOTSPOT · NO CLOUD")
         badge.setObjectName("eyebrow")
         header.addWidget(badge)
         outer.addLayout(header)
@@ -171,25 +185,35 @@ class DropOnce(QMainWindow):
         body.setSpacing(16)
         left = QFrame()
         left.setObjectName("card")
-        controls = QVBoxLayout(left)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+        form = QWidget()
+        form.setObjectName("formContents")
+        controls = QVBoxLayout(form)
         controls.setContentsMargins(20, 16, 20, 16)
         controls.setSpacing(9)
-        heading = QLabel("What are we sending?")
+        heading = QLabel("What would you like to do?")
         heading.setObjectName("heading")
         controls.addWidget(heading)
-        caption = QLabel("Pick a file or paste text. Anyone with the link on this network can open it.")
+        caption = QLabel("Send a file or text, or receive a file. Anyone with the link on this network can use it.")
         caption.setObjectName("muted")
         caption.setWordWrap(True)
         controls.addWidget(caption)
         switch = QHBoxLayout()
-        self.file_mode = QPushButton("↗  File")
-        self.text_mode = QPushButton("≡  Text")
-        for button in (self.file_mode, self.text_mode):
+        self.file_mode = QPushButton("File")
+        self.text_mode = QPushButton("Text")
+        self.receive_mode = QPushButton("Receive")
+        for button, label in ((self.file_mode, "Send a file"),
+                              (self.text_mode, "Send text"),
+                              (self.receive_mode, "Receive a file")):
             button.setObjectName("switch")
+            button.setAccessibleName(label)
             button.setCheckable(True)
             switch.addWidget(button)
         self.file_mode.clicked.connect(self.show_file)
         self.text_mode.clicked.connect(self.show_text)
+        self.receive_mode.clicked.connect(self.show_receive)
         controls.addLayout(switch)
         self.inputs = QStackedWidget()
         file_page = QWidget()
@@ -206,9 +230,43 @@ class DropOnce(QMainWindow):
         self.text_input = QPlainTextEdit()
         self.text_input.setPlaceholderText("Paste a message, link, or note…")
         self.inputs.addWidget(self.text_input)
+        receive_page = QWidget()
+        receive_layout = QVBoxLayout(receive_page)
+        receive_layout.setContentsMargins(3, 10, 3, 10)
+        receive_layout.setSpacing(12)
+        receive_heading = QLabel("Receive from your iPhone")
+        receive_heading.setObjectName("heading")
+        receive_layout.addWidget(receive_heading)
+        receive_intro = QLabel("Start a one-time link, open it on your iPhone, and choose a file "
+                               "in Safari. It will be saved to the folder you pick below.")
+        receive_intro.setObjectName("muted")
+        receive_intro.setWordWrap(True)
+        receive_layout.addWidget(receive_intro)
+        folder_button = QPushButton("Choose destination folder…")
+        folder_button.clicked.connect(self.choose_destination)
+        receive_layout.addWidget(folder_button)
+        self.destination_label = QLabel("No destination folder selected")
+        self.destination_label.setObjectName("muted")
+        self.destination_label.setWordWrap(True)
+        receive_layout.addWidget(self.destination_label)
+        receive_layout.addStretch()
+        self.inputs.addWidget(receive_page)
         controls.addWidget(self.inputs, 1)
+        self.connection_mode = QComboBox()
+        self.connection_mode.addItems(("Same Wi-Fi / LAN", "iPhone USB Personal Hotspot"))
+        self.connection_mode.setAccessibleName("How the iPhone connects")
+        self.connection_mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        controls.addWidget(QLabel("CONNECTION"))
+        controls.addWidget(self.connection_mode)
+        self.connection_hint = QLabel()
+        self.connection_hint.setObjectName("muted")
+        self.connection_hint.setWordWrap(True)
+        controls.addWidget(self.connection_hint)
         self.network = QComboBox()
         self.network.setAccessibleName("Network address to share from")
+        self.network.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.network.setMinimumContentsLength(8)
+        self.network.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         controls.addWidget(QLabel("YOUR NETWORK ADDRESS"))
         network_row = QHBoxLayout()
         network_row.addWidget(self.network, 1)
@@ -217,10 +275,21 @@ class DropOnce(QMainWindow):
         rescan.clicked.connect(self.refresh_networks)
         network_row.addWidget(rescan)
         controls.addLayout(network_row)
+        self.form_scroll = QScrollArea()
+        self.form_scroll.setObjectName("formScroll")
+        self.form_scroll.setWidgetResizable(True)
+        self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.form_scroll.setWidget(form)
+        left_layout.addWidget(self.form_scroll, 1)
+        footer = QWidget()
+        footer.setObjectName("formContents")
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(20, 7, 20, 16)
         self.start_button = QPushButton("Create one-time link  →")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.start_share)
-        controls.addWidget(self.start_button)
+        footer_layout.addWidget(self.start_button)
+        left_layout.addWidget(footer)
         body.addWidget(left, 1)
 
         right = QFrame()
@@ -232,7 +301,7 @@ class DropOnce(QMainWindow):
         self.status = QLabel("Ready when you are")
         self.status.setObjectName("heading")
         output.addWidget(self.status)
-        self.message = QLabel("Choose something to share, then scan the code on another device.")
+        self.message = QLabel("Choose a direction, then scan the code on another device.")
         self.message.setObjectName("muted")
         self.message.setWordWrap(True)
         output.addWidget(self.message)
@@ -261,7 +330,7 @@ class DropOnce(QMainWindow):
         output.addLayout(actions)
         body.addWidget(right, 1)
         outer.addLayout(body, 1)
-        foot = QLabel("PRIVATE LINK  ·  EXPIRES IN 10 MINUTES  ·  ONE DOWNLOAD OR ONE TEXT VIEW  ·  USE A TRUSTED NETWORK")
+        foot = QLabel("PRIVATE LINK  ·  EXPIRES IN 10 MINUTES  ·  ONE TRANSFER  ·  USE A TRUSTED NETWORK")
         foot.setObjectName("eyebrow")
         foot.setWordWrap(True)
         outer.addWidget(foot)
@@ -271,18 +340,36 @@ class DropOnce(QMainWindow):
         self.ticker.timeout.connect(self.update_status)
         self.ticker.start()
         self.set_mode(0)
+        self.connection_mode.currentIndexChanged.connect(self.change_connection)
+        self.network.currentIndexChanged.connect(self.change_network)
         self.refresh_networks()
 
     def set_mode(self, index):
+        if self.share and self.inputs.currentIndex() != index:
+            self.stop_share()
         self.inputs.setCurrentIndex(index)
         self.file_mode.setChecked(index == 0)
         self.text_mode.setChecked(index == 1)
+        self.receive_mode.setChecked(index == 2)
+        self.start_button.setText("Create receive link  →" if index == 2 else "Create one-time link  →")
+        if index == 2 and not self.share:
+            self.message.setText("Choose a folder, then let your iPhone send one file here.")
 
     def show_file(self):
         self.set_mode(0)
 
     def show_text(self):
         self.set_mode(1)
+
+    def show_receive(self):
+        self.set_mode(2)
+
+    def choose_destination(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose where received files are saved",
+                                                  str(Path.home() / "Downloads"))
+        if folder:
+            self.destination = Path(folder)
+            self.destination_label.setText(str(self.destination))
 
     def copy_link(self):
         QApplication.clipboard().setText(self.link.text())
@@ -295,16 +382,45 @@ class DropOnce(QMainWindow):
 
     def refresh_networks(self):
         previous = self.network.currentData()
+        addresses = lan_addresses()
+        if self.connection_mode.currentIndex() == 1:
+            addresses.sort(key=lambda item: not possible_iphone_tether(*item))
+        self.network.blockSignals(True)
         self.network.clear()
-        for address, interface in lan_addresses():
-            self.network.addItem(f"{address}  ·  {interface}", address)
+        for address, interface in addresses:
+            hint = " · possible iPhone tether" if possible_iphone_tether(address, interface) else ""
+            self.network.addItem(f"{address}  ·  {interface}{hint}", address)
+            self.network.setItemData(self.network.count() - 1, interface, Qt.ItemDataRole.UserRole + 1)
         if previous:
             index = self.network.findData(previous)
-            if index >= 0:
+            if index >= 0 and self.connection_mode.currentIndex() == 0:
                 self.network.setCurrentIndex(index)
+        self.network.blockSignals(False)
         self.start_button.setEnabled(self.network.count() > 0)
         if not self.network.count():
-            self.message.setText("No private Wi-Fi or LAN address found. Connect to a network and refresh.")
+            self.message.setText("No private network address found. Connect to Wi-Fi or enable "
+                                 "iPhone USB Personal Hotspot, then refresh.")
+        self.update_connection_hint()
+
+    def change_connection(self):
+        if self.share:
+            self.stop_share()
+        self.refresh_networks()
+
+    def change_network(self):
+        if self.share:
+            self.stop_share()
+        self.update_connection_hint()
+
+    def update_connection_hint(self):
+        if self.connection_mode.currentIndex() == 0:
+            self.connection_hint.setText("Your iPhone and computer should be on the same Wi-Fi.")
+            return
+        address = self.network.currentData()
+        interface = self.network.currentData(Qt.ItemDataRole.UserRole + 1) if address else ""
+        warning = "" if address and possible_iphone_tether(address, interface) else " Check the selected adapter."
+        self.connection_hint.setText("Plug in your iPhone, tap Trust, turn on Personal Hotspot, then refresh. "
+                                     "Choose the iPhone USB network, not regular Wi-Fi." + warning)
 
     def start_share(self):
         address = self.network.currentData()
@@ -315,8 +431,12 @@ class DropOnce(QMainWindow):
                 if self.file is None:
                     raise ValueError("Choose a file first")
                 new_share = ShareServer(address, file=self.file)
-            else:
+            elif self.inputs.currentIndex() == 1:
                 new_share = ShareServer(address, text=self.text_input.toPlainText())
+            else:
+                if self.destination is None:
+                    raise ValueError("Choose a destination folder first")
+                new_share = ReceiveServer(address, self.destination)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Couldn't start sharing", str(exc))
             return
@@ -343,10 +463,14 @@ class DropOnce(QMainWindow):
             return
         seconds = self.share.remaining
         self.status.setText("Your link is live")
-        self.message.setText(f"Scan with a device on the same Wi-Fi. Expires in {seconds // 60}:{seconds % 60:02d}."
+        direction = "Open on your iPhone and choose one file to upload." if isinstance(self.share, ReceiveServer) \
+            else "Scan with your iPhone to get the file or text."
+        connection = "USB Personal Hotspot" if self.connection_mode.currentIndex() == 1 else "the same Wi-Fi"
+        self.message.setText(f"{direction} Use {connection}. Expires in {seconds // 60}:{seconds % 60:02d}."
                              + (f"\n{self.share.error}" if self.share.error else ""))
 
     def stop_share(self, checked=False, *, completed=False, expired=False):
+        received = self.share.received if isinstance(self.share, ReceiveServer) else None
         if self.share:
             self.share.stop()
             self.share = None
@@ -357,8 +481,10 @@ class DropOnce(QMainWindow):
         self.code.setPixmap(QPixmap())
         self.code.setText("◇")
         self.code.setStyleSheet("color:#81e6d1;font-size:82px")
-        self.status.setText("Sent!" if completed else "Link expired" if expired else "Sharing stopped")
-        self.message.setText("Ready for another transfer." if completed else
+        self.status.setText(("Received!" if received else "Sent!") if completed else
+                            "Link expired" if expired else "Sharing stopped")
+        self.message.setText(f"Saved to {received}" if completed and received else
+                             "Ready for another transfer." if completed else
                              "Create a new link whenever you're ready.")
 
     def closeEvent(self, event):
@@ -372,7 +498,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = DropOnce()
     if "--self-check" in sys.argv:
-        assert window.network is not None and window.inputs.count() == 2
+        assert window.network is not None and window.inputs.count() == 3
         assert not qr_image("http://127.0.0.1:1234/s/example").isNull()
         window.close()
         raise SystemExit(0)

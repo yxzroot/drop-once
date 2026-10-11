@@ -1,4 +1,4 @@
-"""Single-use, local-network transfers. No upload endpoint or cloud service."""
+"""Single-use, local-network transfers without a cloud service."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
@@ -8,7 +8,7 @@ import secrets
 import stat
 from threading import Lock, Thread
 from time import monotonic
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
@@ -27,8 +27,10 @@ def _page(content):
             "small{color:#84e6cf;font-weight:700;letter-spacing:.12em}h1{font-size:28px;overflow-wrap:anywhere}"
             "p{color:#bac8da;line-height:1.5}pre{white-space:pre-wrap;overflow-wrap:anywhere;"
             "font:inherit;background:#0e1320;padding:20px;border-radius:12px;max-height:60vh;overflow:auto}"
-            "a{display:inline-block;background:#84e6cf;color:#0e1320;padding:14px 22px;"
-            "border-radius:12px;text-decoration:none;font-weight:800;margin-top:10px}"
+            "a,button{display:inline-block;background:#84e6cf;color:#0e1320;padding:14px 22px;"
+            "border:0;border-radius:12px;text-decoration:none;font:700 16px system-ui;cursor:pointer;margin-top:10px}"
+            "input[type=file]{display:block;width:100%;padding:18px;border:1px dashed #84e6cf;"
+            "border-radius:12px;color:#eff5ff;background:#0e1320}"
             "</style></head><body><main><small>DROPONCE · LOCAL TRANSFER</small>"
             f"{content}</main></body></html>").encode("utf-8")
 
@@ -63,6 +65,9 @@ class ShareServer:
             self.size = len(text.encode("utf-8"))
             if self.size > MAX_TEXT_BYTES:
                 raise ValueError("Text must be smaller than 64 KiB")
+        self._start(address, lifetime)
+
+    def _start(self, address, lifetime):
         self.token = secrets.token_urlsafe(32)
         self.deadline = monotonic() + lifetime
         self.lock = Lock()
@@ -198,5 +203,146 @@ class ShareServer:
                                                   "Ask the sender to share it again.</p>"))
                         except (BrokenPipeError, ConnectionResetError):
                             pass
+
+        return Handler
+
+
+class ReceiveServer(ShareServer):
+    """One browser upload to a computer-selected folder. Never overwrite a file."""
+
+    def __init__(self, address, directory, lifetime=EXPIRY_SECONDS):
+        folder = Path(directory)
+        if folder.is_symlink() or not folder.is_dir():
+            raise ValueError("Choose an existing, real destination folder")
+        if not (1 <= lifetime <= 3600):
+            raise ValueError("Invalid share lifetime")
+        self.address = address
+        self.directory = folder
+        self.received = None
+        self._start(address, lifetime)
+
+    def _handler(self):
+        share = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, code, body, *, mime="text/html; charset=utf-8", script_nonce=None):
+                self.send_response(code)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                csp = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+                if script_nonce:
+                    csp += f"; script-src 'nonce-{script_nonce}'; connect-src 'self'"
+                self.send_header("Content-Security-Policy", csp)
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    return False
+                return True
+
+            def do_GET(self):
+                if urlsplit(self.path).path != f"/s/{share.token}":
+                    self.reply(404, _page("<h1>Not found</h1>"))
+                    return
+                if share.served or share.stopped or not share.remaining:
+                    self.reply(410, _page("<h1>This link has expired.</h1>"))
+                    return
+                nonce = secrets.token_urlsafe(16)
+                body = _page("<h1>Send a file to this computer</h1>"
+                             "<p>Choose one file. It is sent directly over this local connection; "
+                             "keep this page open until the transfer finishes.</p>"
+                             "<input type='file' id='file' aria-label='File to send'>"
+                             "<button id='send' type='button'>Send file</button>"
+                             "<p id='status'>Maximum file size: 2 GiB.</p>"
+                             f"<script nonce='{nonce}'>"
+                             "document.getElementById('send').onclick=async()=>{"
+                             "const file=document.getElementById('file').files[0];"
+                             "const status=document.getElementById('status');"
+                             "if(!file){status.textContent='Choose a file first.';return;}"
+                             "status.textContent='Sending… Please keep this page open.';"
+                             "try{const response=await fetch(location.pathname+'/upload?name='+"
+                             "encodeURIComponent(file.name),{method:'PUT',body:file});"
+                             "status.textContent=response.ok?'Sent! You can close this page now.':"
+                             "'Could not send. The link may have expired or the file is too large.';}"
+                             "catch(_){status.textContent='Connection lost. Ask for a new link.';}"
+                             "};</script>")
+                self.reply(200, body, script_nonce=nonce)
+
+            def do_PUT(self):
+                request = urlsplit(self.path)
+                if request.path != f"/s/{share.token}/upload":
+                    self.reply(404, _page("<h1>Not found</h1>"))
+                    return
+                if share.stopped or share.served or not share.remaining:
+                    self.reply(410, _page("<h1>This link has expired.</h1>"))
+                    return
+                length = self.headers.get("Content-Length", "")
+                if not length.isdecimal():
+                    self.reply(411, _page("<h1>Upload length required.</h1>"))
+                    return
+                size = int(length)
+                if size > MAX_FILE_SIZE:
+                    self.reply(413, _page("<h1>File is too large.</h1>"))
+                    return
+                names = parse_qs(request.query, keep_blank_values=True).get("name", [])
+                name = names[0] if len(names) == 1 else ""
+                if (not name or len(name) > 240 or name in (".", "..") or Path(name).name != name
+                        or any(c in name for c in '\\<>:"|?*') or name.endswith((" ", "."))
+                        or any(ord(c) < 32 for c in name)
+                        or name.split(".")[0].upper() in
+                        {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                         *(f"LPT{i}" for i in range(1, 10))}):
+                    self.reply(400, _page("<h1>Invalid filename.</h1>"))
+                    return
+                if not share._claim():
+                    self.reply(410, _page("<h1>This link is already in use.</h1>"))
+                    return
+                destination = None
+                try:
+                    # Exclusive creation protects existing files, including symlinks.
+                    for number in range(1001):
+                        filename = name if number == 0 else f"{Path(name).stem}-{number}{Path(name).suffix}"
+                        candidate = share.directory / filename
+                        try:
+                            output = candidate.open("xb")
+                        except FileExistsError:
+                            continue
+                        destination = candidate
+                        break
+                    else:
+                        raise OSError("No available filename in destination folder")
+                    self.connection.settimeout(30)
+                    with output:
+                        remaining = size
+                        while remaining:
+                            if share.stopped or not share.remaining:
+                                raise ConnectionAbortedError("Sharing stopped or expired")
+                            block = self.rfile.read(min(64 * 1024, remaining))
+                            if not block:
+                                raise ConnectionError("Upload ended early")
+                            output.write(block)
+                            remaining -= len(block)
+                    self.reply(200, b"Received", mime="text/plain; charset=utf-8")
+                    with share.lock:
+                        share.received = destination
+                    share._finish(True)
+                except (OSError, ValueError, ConnectionError) as exc:
+                    if destination:
+                        try:
+                            destination.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    share.error = str(exc)
+                    share._finish(False)
+                    try:
+                        self.reply(409, _page("<h1>Could not receive the file.</h1>"))
+                    except OSError:
+                        pass
 
         return Handler
