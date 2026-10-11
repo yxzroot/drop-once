@@ -20,14 +20,14 @@ def get(share, path):
 class TransferTests(unittest.TestCase):
     def test_file_preview_does_not_use_link_but_download_does(self):
         with tempfile.TemporaryDirectory() as temp:
-            source = Path(temp) / 'demo "pack".zip'
+            source = Path(temp) / "demo & pack.zip"
             source.write_bytes(b"zip bytes")
             share = ShareServer("127.0.0.1", file=source)
             try:
                 link = f"/s/{share.token}"
                 code, preview, _ = get(share, link)
                 self.assertEqual(code, 200)
-                self.assertIn(b'&quot;pack&quot;', preview)
+                self.assertIn(b'demo &amp; pack.zip', preview)
                 self.assertFalse(share.served)
                 code, content, headers = get(share, link + "/download")
                 self.assertEqual((code, content), (200, b"zip bytes"))
