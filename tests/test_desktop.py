@@ -1,13 +1,27 @@
 import unittest
 from unittest.mock import patch
-from http.client import HTTPConnection
+from http.client import HTTPSConnection
 from pathlib import Path
+import ssl
 import tempfile
 import time
 
+from cryptography import x509
 from PySide6.QtWidgets import QApplication
 
 from desktop import DropOnce, lan_addresses, possible_iphone_tether, qr_image
+
+
+def setUpModule():
+    global _tls_directory, _tls_patch
+    _tls_directory = tempfile.TemporaryDirectory()
+    _tls_patch = patch("tls_identity.identity_folder", return_value=Path(_tls_directory.name))
+    _tls_patch.start()
+
+
+def tearDownModule():
+    _tls_patch.stop()
+    _tls_directory.cleanup()
 
 
 class DesktopTests(unittest.TestCase):
@@ -25,7 +39,8 @@ class DesktopTests(unittest.TestCase):
                 self.assertIsNotNone(window.share)
                 self.assertIn("127.0.0.1", window.link.text())
                 self.assertFalse(window.code.pixmap().isNull())
-                self.assertGreater(qr_image("http://127.0.0.1").width(), 0)
+                self.assertTrue(window.link.text().startswith("https://"))
+                self.assertGreater(qr_image("https://127.0.0.1").width(), 0)
                 window.stop_share()
                 self.assertIsNone(window.share)
             finally:
@@ -47,6 +62,21 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(possible_iphone_tether("192.168.0.2", "Apple Mobile Device Ethernet"))
         self.assertFalse(possible_iphone_tether("192.168.0.2", "Wi-Fi"))
 
+    def test_certificate_can_be_exported_before_a_link(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("desktop.lan_addresses", return_value=[("127.0.0.1", "test")]):
+            window = DropOnce()
+            try:
+                destination = Path(temp) / "DropOnce-CA.cer"
+                with patch("desktop.QFileDialog.getSaveFileName", return_value=(str(destination), "")), \
+                        patch("desktop.QMessageBox.information"):
+                    window.export_certificate()
+                cert = x509.load_der_x509_certificate(destination.read_bytes())
+                self.assertTrue(cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
+                self.assertIsNone(window.share)
+            finally:
+                window.close()
+
     def test_gui_receives_one_file_into_chosen_folder(self):
         with tempfile.TemporaryDirectory() as temp, \
                 patch("desktop.lan_addresses", return_value=[("127.0.0.1", "test")]):
@@ -56,7 +86,9 @@ class DesktopTests(unittest.TestCase):
                 window.set_mode(2)
                 window.start_share()
                 self.assertIsNotNone(window.share)
-                connection = HTTPConnection("127.0.0.1", window.share.port, timeout=3)
+                context = ssl.create_default_context(cafile=str(window.share.ca_certificate))
+                connection = HTTPSConnection("127.0.0.1", window.share.port, timeout=3,
+                                             context=context)
                 try:
                     connection.request("PUT", f"/s/{window.share.token}/upload?name=from-iphone.txt",
                                        body=b"from my phone")

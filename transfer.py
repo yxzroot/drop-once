@@ -10,10 +10,13 @@ from threading import Lock, Thread
 from time import monotonic
 from urllib.parse import parse_qs, quote, urlsplit
 
+from tls_identity import tls_context
+
 
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 MAX_TEXT_BYTES = 64 * 1024
 EXPIRY_SECONDS = 10 * 60
+UPLOAD_READ_TIMEOUT = 30
 
 
 def _page(content):
@@ -75,7 +78,9 @@ class ShareServer:
         self.in_progress = False
         self.error = None
         self.stopped = False
+        context, self.ca_certificate = tls_context(address)
         self.httpd = ThreadingHTTPServer((address, 0), self._handler())
+        self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_port
         self.thread = Thread(target=self.httpd.serve_forever, name="drop-once-server", daemon=True)
@@ -83,7 +88,7 @@ class ShareServer:
 
     @property
     def url(self):
-        return f"http://{self.address}:{self.port}/s/{self.token}"
+        return f"https://{self.address}:{self.port}/s/{self.token}"
 
     @property
     def remaining(self):
@@ -317,7 +322,7 @@ class ReceiveServer(ShareServer):
                         break
                     else:
                         raise OSError("No available filename in destination folder")
-                    self.connection.settimeout(30)
+                    self.connection.settimeout(UPLOAD_READ_TIMEOUT)
                     with output:
                         remaining = size
                         while remaining:

@@ -8,6 +8,8 @@ import sys
 
 import psutil
 import qrcode
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
@@ -15,6 +17,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHB
                               QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
 from transfer import ReceiveServer, ShareServer
+from tls_identity import tls_context
 
 
 def lan_addresses():
@@ -176,7 +179,7 @@ class DropOnce(QMainWindow):
         logo.setObjectName("headline")
         intro.addWidget(logo)
         header.addLayout(intro, 1)
-        badge = QLabel("●  WI-FI OR USB HOTSPOT · NO CLOUD")
+        badge = QLabel("●  ENCRYPTED HTTPS · NO CLOUD")
         badge.setObjectName("eyebrow")
         header.addWidget(badge)
         outer.addLayout(header)
@@ -301,7 +304,7 @@ class DropOnce(QMainWindow):
         self.status = QLabel("Ready when you are")
         self.status.setObjectName("heading")
         output.addWidget(self.status)
-        self.message = QLabel("Choose a direction, then scan the code on another device.")
+        self.message = QLabel("Export and trust the local certificate on your phone, then create a link and scan it.")
         self.message.setObjectName("muted")
         self.message.setWordWrap(True)
         output.addWidget(self.message)
@@ -318,6 +321,10 @@ class DropOnce(QMainWindow):
         self.link.setPlaceholderText("A one-time link will appear here")
         self.link.setAccessibleName("One-time transfer link")
         output.addWidget(self.link)
+        self.certificate_button = QPushButton("Export phone trust certificate…")
+        self.certificate_button.setToolTip("Install and trust this certificate on your phone before using HTTPS")
+        self.certificate_button.clicked.connect(self.export_certificate)
+        output.addWidget(self.certificate_button)
         actions = QHBoxLayout()
         self.copy = QPushButton("Copy link")
         self.copy.setEnabled(False)
@@ -373,6 +380,32 @@ class DropOnce(QMainWindow):
 
     def copy_link(self):
         QApplication.clipboard().setText(self.link.text())
+
+    def export_certificate(self):
+        address = self.network.currentData()
+        if not address:
+            QMessageBox.information(self, "No network", "Connect to a network and choose its address first.")
+            return
+        try:
+            _, certificate = tls_context(address)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Could not create certificate", str(exc))
+            return
+        destination, _ = QFileDialog.getSaveFileName(
+            self, "Export DropOnce phone trust certificate", str(Path.home() / "Downloads" / "DropOnce-CA.cer"),
+            "Certificate (*.cer)")
+        if destination:
+            try:
+                cert = x509.load_pem_x509_certificate(certificate.read_bytes())
+                Path(destination).write_bytes(cert.public_bytes(serialization.Encoding.DER))
+            except OSError as exc:
+                QMessageBox.warning(self, "Could not export certificate", str(exc))
+                return
+            QMessageBox.information(self, "Install on your phone",
+                                    "Transfer this certificate to your phone through a trusted method, "
+                                    "install it, then enable full trust for DropOnce in iPhone Settings "
+                                    "(General → About → Certificate Trust Settings). "
+                                    "Keep the private key on this computer. See README for details.")
 
     def select_file(self, filename):
         self.file = Path(filename)
@@ -466,7 +499,8 @@ class DropOnce(QMainWindow):
         direction = "Open on your iPhone and choose one file to upload." if isinstance(self.share, ReceiveServer) \
             else "Scan with your iPhone to get the file or text."
         connection = "USB Personal Hotspot" if self.connection_mode.currentIndex() == 1 else "the same Wi-Fi"
-        self.message.setText(f"{direction} Use {connection}. Expires in {seconds // 60}:{seconds % 60:02d}."
+        self.message.setText(f"{direction} Use {connection}. Install and trust the exported certificate "
+                             f"on your phone first. Expires in {seconds // 60}:{seconds % 60:02d}."
                              + (f"\n{self.share.error}" if self.share.error else ""))
 
     def stop_share(self, checked=False, *, completed=False, expired=False):
