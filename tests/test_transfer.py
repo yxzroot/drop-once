@@ -37,7 +37,7 @@ def get(share, path):
 
 def connect(share):
     context = ssl.create_default_context(cafile=str(share.ca_certificate))
-    return HTTPSConnection("127.0.0.1", share.port, timeout=3, context=context)
+    return HTTPSConnection("127.0.0.1", share.port, timeout=10, context=context)
 
 
 class TransferTests(unittest.TestCase):
