@@ -1,4 +1,5 @@
 import unittest
+import hashlib
 from unittest.mock import patch
 from http.client import HTTPSConnection
 from pathlib import Path
@@ -8,9 +9,10 @@ import time
 
 from cryptography import x509
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
-from desktop import DropOnce, lan_addresses, masked_address, possible_iphone_tether, qr_image
+from desktop import (DropOnce, lan_addresses, masked_address, possible_android_tether,
+                     possible_iphone_tether, qr_image)
 
 
 def setUpModule():
@@ -88,7 +90,24 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(possible_iphone_tether("172.20.10.2", "en7"))
         self.assertTrue(possible_iphone_tether("192.168.0.2", "Apple Mobile Device Ethernet"))
         self.assertFalse(possible_iphone_tether("192.168.0.2", "Wi-Fi"))
+        self.assertTrue(possible_android_tether("192.168.42.1", "Remote NDIS Compatible Device"))
+        self.assertTrue(possible_android_tether("192.168.42.1", "usb0"))
+        self.assertFalse(possible_android_tether("192.168.1.2", "Wi-Fi"))
         self.assertEqual(masked_address("192.168.1.20"), "192.•••.•••.20")
+
+    def test_android_usb_selection_and_receive_mode(self):
+        with patch("desktop.lan_addresses", return_value=[("192.168.1.5", "Wi-Fi"),
+                                                         ("192.168.42.2", "usb0")]):
+            window = DropOnce()
+            try:
+                window.connection_mode.setCurrentIndex(window.connection_mode.findData("android-usb"))
+                self.assertEqual(window.network.currentData(), "192.168.42.2")
+                self.assertIn("Android", window.connection_hint.text())
+                self.assertNotIn("192.168.42.2", window.network.currentText())
+                window.set_mode(2)
+                self.assertIn("phone", window.inputs.widget(2).findChildren(QLabel)[0].text())
+            finally:
+                window.close()
 
     def test_theme_selection_persists_and_changes_palette(self):
         with tempfile.TemporaryDirectory() as temp, \
@@ -152,5 +171,10 @@ class DesktopTests(unittest.TestCase):
                     time.sleep(.01)
                 self.assertEqual((Path(temp) / "from-iphone.txt").read_bytes(), b"from my phone")
                 self.assertEqual(window.status.text(), "Received!")
+                self.assertIn(hashlib.sha256(b"from my phone").hexdigest(),
+                              window.message.text().replace("\n", ""))
+                self.assertEqual(window.copy.text(), "Copy SHA-256")
+                window.copy_link()
+                self.assertEqual(QApplication.clipboard().text(), hashlib.sha256(b"from my phone").hexdigest())
             finally:
                 window.close()

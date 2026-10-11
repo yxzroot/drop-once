@@ -1,5 +1,6 @@
 from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
+import hashlib
 import os
 import socket
 import stat
@@ -61,21 +62,30 @@ class TransferTests(unittest.TestCase):
                 code, page, headers = get(receive, link)
                 self.assertEqual(code, 200)
                 self.assertIn(b"Send a file to this computer", page)
+                self.assertIn(b"crypto.subtle.digest('SHA-256'", page)
                 self.assertIn("script-src", headers["Content-Security-Policy"])
                 connection = connect(receive)
                 try:
                     connection.request("PUT", link + "/upload?name=photo.jpg", body=b"new photo",
-                                       headers={"Content-Type": "application/octet-stream"})
+                                       headers={"Content-Type": "application/octet-stream",
+                                                "X-Content-SHA256": hashlib.sha256(b"new photo").hexdigest()})
                     response = connection.getresponse()
                     self.assertEqual(response.status, 200)
+                    self.assertEqual(response.getheader("X-Content-SHA256"),
+                                     hashlib.sha256(b"new photo").hexdigest())
                     response.read()
                 finally:
                     connection.close()
+                for _ in range(30):
+                    if receive.served:
+                        break
+                    time.sleep(.01)
                 self.assertEqual(existing.read_bytes(), b"keep original")
                 self.assertEqual((folder / "photo-1.jpg").read_bytes(), b"new photo")
                 if os.name != "nt":
                     self.assertEqual(stat.S_IMODE((folder / "photo-1.jpg").stat().st_mode), 0o600)
                 self.assertEqual(receive.received, folder / "photo-1.jpg")
+                self.assertEqual(receive.sha256, hashlib.sha256(b"new photo").hexdigest())
                 self.assertEqual(get(receive, link)[0], 410)
             finally:
                 receive.stop()
@@ -97,6 +107,15 @@ class TransferTests(unittest.TestCase):
                         connection.close()
                 self.assertEqual(list(Path(temp).iterdir()), [])
                 self.assertFalse(receive.served)
+                connection = connect(receive)
+                try:
+                    connection.request("PUT", link + "?name=hash.bin", body=b"bad",
+                                       headers={"X-Content-SHA256": "not-a-sha256"})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    response.read()
+                finally:
+                    connection.close()
                 connection = connect(receive)
                 try:
                     connection.putrequest("PUT", link + "?name=duplicate.bin")
@@ -155,6 +174,40 @@ class TransferTests(unittest.TestCase):
             finally:
                 receive.stop()
 
+    def test_wrong_sha256_rejects_upload_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            share = ReceiveServer("127.0.0.1", temp)
+            try:
+                path = f"/s/{share.token}/upload?name=verified.bin"
+                connection = connect(share)
+                try:
+                    connection.request("PUT", path, body=b"actual",
+                                       headers={"X-Content-SHA256": "0" * 64})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 409)
+                    response.read()
+                finally:
+                    connection.close()
+                self.assertEqual(list(Path(temp).iterdir()), [])
+                self.assertIsNone(share.sha256)
+                self.assertFalse(share.served)
+                connection = connect(share)
+                try:
+                    connection.request("PUT", path, body=b"actual",
+                                       headers={"X-Content-SHA256": hashlib.sha256(b"actual").hexdigest()})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    response.read()
+                finally:
+                    connection.close()
+                for _ in range(30):
+                    if share.served:
+                        break
+                    time.sleep(.01)
+                self.assertEqual(share.sha256, hashlib.sha256(b"actual").hexdigest())
+            finally:
+                share.stop()
+
     def test_file_preview_does_not_use_link_but_download_does(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "demo & pack.zip"
@@ -174,6 +227,7 @@ class TransferTests(unittest.TestCase):
                         break
                     time.sleep(.01)
                 self.assertTrue(share.served)
+                self.assertEqual(share.sha256, hashlib.sha256(b"zip bytes").hexdigest())
                 self.assertEqual(get(share, link + "/download")[0], 410)
                 self.assertEqual(get(share, "/s/not-the-token")[0], 404)
             finally:

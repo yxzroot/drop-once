@@ -2,6 +2,8 @@
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html import escape
+import hashlib
+import hmac
 import os
 from pathlib import Path
 import secrets
@@ -32,8 +34,9 @@ def _page(content):
             "main{width:min(100%,560px);background:#192337;border:1px solid #34465f;"
             "border-radius:24px;padding:32px;box-shadow:0 24px 80px #05091177}"
             "small{color:#84e6cf;font-weight:700;letter-spacing:.12em}h1{font-size:28px;overflow-wrap:anywhere}"
-            "p{color:#bac8da;line-height:1.5}pre{white-space:pre-wrap;overflow-wrap:anywhere;"
-            "font:inherit;background:#0e1320;padding:20px;border-radius:12px;max-height:60vh;overflow:auto}"
+            "p{color:#bac8da;line-height:1.5}p#status{overflow-wrap:anywhere}"
+            "pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#0e1320;"
+            "padding:20px;border-radius:12px;max-height:60vh;overflow:auto}"
             "a,button{display:inline-block;background:#84e6cf;color:#0e1320;padding:14px 22px;"
             "border:0;border-radius:12px;text-decoration:none;font:700 16px system-ui;cursor:pointer;margin-top:10px}"
             "input[type=file]{display:block;width:100%;padding:18px;border:1px dashed #84e6cf;"
@@ -119,6 +122,7 @@ class ShareServer:
         self.served = False
         self.in_progress = False
         self.error = None
+        self.sha256 = None
         self.stopped = False
         context, self.ca_certificate = tls_context(address)
         self.httpd = TransferHTTPServer((address, 0), self._handler())
@@ -228,6 +232,7 @@ class ShareServer:
                         self.end_headers()
                         headers_sent = True
                         remaining = share.size
+                        digest = hashlib.sha256()
                         while remaining:
                             if share.stopped:
                                 raise ConnectionAbortedError("Sharing stopped")
@@ -235,7 +240,9 @@ class ShareServer:
                             if not block:
                                 raise OSError("File changed during download")
                             self.wfile.write(block)
+                            digest.update(block)
                             remaining -= len(block)
+                    share.sha256 = digest.hexdigest()
                     share._finish(True)
                 except (OSError, ValueError, BrokenPipeError, ConnectionResetError) as exc:
                     share.error = str(exc)
@@ -275,13 +282,16 @@ class ReceiveServer(ShareServer):
             def log_message(self, *args):
                 pass
 
-            def reply(self, code, body, *, mime="text/html; charset=utf-8", script_nonce=None):
+            def reply(self, code, body, *, mime="text/html; charset=utf-8", script_nonce=None,
+                      digest=None):
                 self.send_response(code)
                 self.send_header("Content-Type", mime)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("X-Content-Type-Options", "nosniff")
+                if digest:
+                    self.send_header("X-Content-SHA256", digest)
                 csp = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
                 if script_nonce:
                     csp += f"; script-src 'nonce-{script_nonce}'; connect-src 'self'"
@@ -313,11 +323,17 @@ class ReceiveServer(ShareServer):
                              "const status=document.getElementById('status');"
                              "if(!file){status.textContent='Choose a file first.';return;}"
                              "const button=document.getElementById('send');button.disabled=true;"
-                             "status.textContent='Sending… Please keep this page open.';"
-                             "try{const response=await fetch(location.pathname+'/upload?name='+"
-                             "encodeURIComponent(file.name),{method:'PUT',body:file});"
-                             "status.textContent=response.ok?'Sent! You can close this page now.':"
-                             "'Could not send. The link may have expired or the file is too large.';"
+                             "status.textContent='Checking and sending… Please keep this page open.';"
+                             "try{const headers={};"
+                             "if(file.size<=32*1024*1024 && globalThis.crypto?.subtle){"
+                             "const hash=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());"
+                             "headers['X-Content-SHA256']=Array.from(new Uint8Array(hash),"
+                             "b=>b.toString(16).padStart(2,'0')).join('');}"
+                             "const response=await fetch(location.pathname+'/upload?name='+"
+                             "encodeURIComponent(file.name),{method:'PUT',body:file,headers});"
+                             "status.textContent=response.ok?'Sent! SHA-256: '+"
+                             "response.headers.get('X-Content-SHA256'):"
+                             "'Could not send. The link may have expired or the file failed verification.';"
                              "if(!response.ok)button.disabled=false;}"
                              "catch(_){status.textContent='Connection lost. Ask for a new link.';button.disabled=false;}"
                              "};</script>")
@@ -340,6 +356,12 @@ class ReceiveServer(ShareServer):
                 size = int(length)
                 if size > MAX_FILE_SIZE:
                     self.reply(413, _page("<h1>File is too large.</h1>"))
+                    return
+                expected = self.headers.get_all("X-Content-SHA256", [])
+                if (len(expected) > 1 or (expected and (len(expected[0]) != 64
+                        or not expected[0].isascii()
+                        or any(c not in "0123456789abcdefABCDEF" for c in expected[0])))):
+                    self.reply(400, _page("<h1>Invalid SHA-256 checksum.</h1>"))
                     return
                 names = parse_qs(request.query, keep_blank_values=True).get("name", [])
                 name = names[0] if len(names) == 1 else ""
@@ -373,6 +395,7 @@ class ReceiveServer(ShareServer):
                     else:
                         raise OSError("No available filename in destination folder")
                     self.connection.settimeout(UPLOAD_READ_TIMEOUT)
+                    digest = hashlib.sha256()
                     with output:
                         remaining = size
                         while remaining:
@@ -382,10 +405,15 @@ class ReceiveServer(ShareServer):
                             if not block:
                                 raise ConnectionError("Upload ended early")
                             output.write(block)
+                            digest.update(block)
                             remaining -= len(block)
-                    self.reply(200, b"Received", mime="text/plain; charset=utf-8")
+                    result = digest.hexdigest()
+                    if expected and not hmac.compare_digest(result, expected[0].lower()):
+                        raise ValueError("SHA-256 mismatch")
+                    self.reply(200, b"Received", mime="text/plain; charset=utf-8", digest=result)
                     with share.lock:
                         share.received = destination
+                        share.sha256 = result
                     share._finish(True)
                 except (OSError, ValueError, ConnectionError) as exc:
                     if destination:

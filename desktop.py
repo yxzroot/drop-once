@@ -55,6 +55,12 @@ def possible_iphone_tether(address, interface):
             or ipaddress.ip_address(address) in ipaddress.ip_network("172.20.10.0/28"))
 
 
+def possible_android_tether(address, interface):
+    """Android USB network names vary; only rank candidates, never assume reachability."""
+    name = interface.lower()
+    return any(part in name for part in ("android", "rndis", "ndis", "usb", "ncm", "enx", "tether"))
+
+
 def masked_address(address):
     """Keep enough context to distinguish adapters without displaying a full IP."""
     parts = address.split(".")
@@ -224,6 +230,7 @@ class DropOnce(QMainWindow):
         self.share = None
         self.file = None
         self.destination = None
+        self.last_digest = None
         self.settings = QSettings("DropOnce", "DropOnce")
         self.theme = str(self.settings.value("theme", "system"))
         if self.theme not in ("system", *PALETTES):
@@ -326,11 +333,10 @@ class DropOnce(QMainWindow):
         receive_layout = QVBoxLayout(receive_page)
         receive_layout.setContentsMargins(3, 10, 3, 10)
         receive_layout.setSpacing(12)
-        receive_heading = QLabel("Receive from your iPhone")
+        receive_heading = QLabel("Receive from your phone")
         receive_heading.setObjectName("heading")
         receive_layout.addWidget(receive_heading)
-        receive_intro = QLabel("Start a one-time link, open it on your iPhone, and choose a file "
-                               "in Safari. It will be saved to the folder you pick below.")
+        receive_intro = QLabel("Pick a save folder. Your phone uploads one file through its browser.")
         receive_intro.setObjectName("muted")
         receive_intro.setWordWrap(True)
         receive_layout.addWidget(receive_intro)
@@ -345,8 +351,10 @@ class DropOnce(QMainWindow):
         self.inputs.addWidget(receive_page)
         controls.addWidget(self.inputs, 1)
         self.connection_mode = QComboBox()
-        self.connection_mode.addItems(("Same Wi-Fi / LAN", "iPhone USB Personal Hotspot"))
-        self.connection_mode.setAccessibleName("How the iPhone connects")
+        self.connection_mode.addItem("Same Wi-Fi / LAN", "wifi")
+        self.connection_mode.addItem("iPhone USB Personal Hotspot", "iphone-usb")
+        self.connection_mode.addItem("Android USB tethering", "android-usb")
+        self.connection_mode.setAccessibleName("How the phone connects")
         self.connection_mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         connection_label = QLabel("CONNECTION")
         connection_label.setObjectName("section")
@@ -373,9 +381,9 @@ class DropOnce(QMainWindow):
         footer_layout = QVBoxLayout(footer)
         footer_layout.setContentsMargins(20, 7, 20, 16)
         footer_layout.setSpacing(8)
-        network_label = QLabel("NETWORK · ADDRESS MASKED")
-        network_label.setObjectName("section")
-        footer_layout.addWidget(network_label)
+        self.network_label = QLabel("NETWORK · ADDRESS MASKED")
+        self.network_label.setObjectName("section")
+        footer_layout.addWidget(self.network_label)
         network_row = QHBoxLayout()
         network_row.addWidget(self.network, 1)
         rescan = QPushButton("↻")
@@ -407,6 +415,7 @@ class DropOnce(QMainWindow):
         self.message = QLabel("Export and trust the local certificate on your phone, then create a link and scan it.")
         self.message.setObjectName("muted")
         self.message.setWordWrap(True)
+        self.message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         output.addWidget(self.message)
         output.addStretch()
         qr_well = QFrame()
@@ -472,7 +481,7 @@ class DropOnce(QMainWindow):
         self.refresh_mode_style()
         self.start_button.setText("Create receive link  →" if index == 2 else "Create one-time link  →")
         if index == 2 and not self.share:
-            self.message.setText("Choose a folder, then let your iPhone send one file here.")
+            self.message.setText("Choose a folder, then let your phone send one file here.")
 
     def show_file(self):
         self.set_mode(0)
@@ -494,6 +503,9 @@ class DropOnce(QMainWindow):
         if self.share and self.share.remaining and not self.share.served:
             QApplication.clipboard().setText(self.share.url)
             self.copy.setText("Copied ✓")
+        elif not self.share and self.last_digest:
+            QApplication.clipboard().setText(self.last_digest)
+            self.copy.setText("Copied SHA ✓")
 
     def hide_qr(self):
         self.qr_timer.stop()
@@ -535,9 +547,11 @@ class DropOnce(QMainWindow):
                 QMessageBox.warning(self, "Could not export certificate", str(exc))
                 return
             QMessageBox.information(self, "Install on your phone",
-                                    "Transfer this certificate to your phone through a trusted method, "
-                                    "install it, then enable full trust for DropOnce in iPhone Settings "
-                                    "(General → About → Certificate Trust Settings). "
+                                    "Transfer this certificate to your phone through a trusted method. "
+                                    "On iPhone, install the profile and enable full trust in Settings → "
+                                    "General → About → Certificate Trust Settings. On Android, use "
+                                    "Settings → Security → Install a certificate → CA certificate "
+                                    "(names vary by phone). Never bypass a certificate warning. "
                                     "Keep the private key on this computer. See README for details.")
 
     def select_file(self, filename):
@@ -551,12 +565,17 @@ class DropOnce(QMainWindow):
         addresses = lan_addresses()
         if self.share and previous not in (address for address, _ in addresses):
             self.stop_share()
-        if self.connection_mode.currentIndex() == 1:
+        mode = self.connection_mode.currentData()
+        if mode == "iphone-usb":
             addresses.sort(key=lambda item: not possible_iphone_tether(*item))
+        elif mode == "android-usb":
+            addresses.sort(key=lambda item: not possible_android_tether(*item))
         self.network.blockSignals(True)
         self.network.clear()
         for address, interface in addresses:
-            hint = " · possible iPhone tether" if possible_iphone_tether(address, interface) else ""
+            possible_usb = ((mode == "iphone-usb" and possible_iphone_tether(address, interface))
+                            or (mode == "android-usb" and possible_android_tether(address, interface)))
+            hint = " · possible USB tether" if possible_usb else ""
             self.network.addItem(f"{masked_address(address)}  ·  {interface}{hint}", address)
             self.network.setItemData(self.network.count() - 1, interface, Qt.ItemDataRole.UserRole + 1)
         if previous:
@@ -567,7 +586,7 @@ class DropOnce(QMainWindow):
         self.start_button.setEnabled(self.network.count() > 0)
         if not self.network.count():
             self.message.setText("No private network address found. Connect to Wi-Fi or enable "
-                                 "iPhone USB Personal Hotspot, then refresh.")
+                                 "USB tethering on your phone, then refresh.")
         self.update_connection_hint()
 
     def change_connection(self):
@@ -584,14 +603,25 @@ class DropOnce(QMainWindow):
         self.update_connection_hint()
 
     def update_connection_hint(self):
-        if self.connection_mode.currentIndex() == 0:
-            self.connection_hint.setText("Your iPhone and computer should be on the same Wi-Fi.")
+        mode = self.connection_mode.currentData()
+        self.network_label.setText({"wifi": "WI-FI · ADDRESS MASKED",
+                                    "iphone-usb": "IPHONE USB · ADDRESS MASKED",
+                                    "android-usb": "ANDROID USB · ADDRESS MASKED"}.get(mode, "NETWORK · ADDRESS MASKED"))
+        if mode == "wifi":
+            self.connection_hint.setText("Your phone and computer should be on the same Wi-Fi.")
             return
         address = self.network.currentData()
         interface = self.network.currentData(Qt.ItemDataRole.UserRole + 1) if address else ""
-        warning = "" if address and possible_iphone_tether(address, interface) else " Check the selected adapter."
-        self.connection_hint.setText("Plug in your iPhone, tap Trust, turn on Personal Hotspot, then refresh. "
-                                     "Choose the iPhone USB network, not regular Wi-Fi." + warning)
+        if mode == "iphone-usb":
+            likely = possible_iphone_tether(address, interface) if address else False
+            hint = "Plug in your iPhone, tap Trust, turn on Personal Hotspot, then refresh. "
+        else:
+            likely = possible_android_tether(address, interface) if address else False
+            hint = "Plug in your Android, enable USB tethering in Hotspot & tethering, then refresh. "
+            if sys.platform == "darwin":
+                hint += "macOS generally does not support Android USB tethering; use Wi-Fi. "
+        self.connection_hint.setText(hint + "Choose the phone's USB adapter, not regular Wi-Fi."
+                                     + ("" if likely else " Check the selected adapter."))
 
     def start_share(self):
         address = self.network.currentData()
@@ -612,7 +642,10 @@ class DropOnce(QMainWindow):
             QMessageBox.warning(self, "Couldn't start sharing", str(exc))
             return
         if self.share:
+            if QApplication.clipboard().text() == self.share.url:
+                QApplication.clipboard().clear()
             self.share.stop()
+        self.last_digest = None
         self.share = new_share
         self.hide_qr()
         self.link.setText(f"https://{masked_address(address)}:••••/s/••••••")
@@ -635,34 +668,39 @@ class DropOnce(QMainWindow):
         seconds = self.share.remaining
         self.status.setText("Your link is live")
         if isinstance(self.share, ReceiveServer):
-            direction = ("Open the link on your iPhone and choose one file to upload." if self.qr_visible else
+            direction = ("Open the link on your phone and choose one file to upload." if self.qr_visible else
                          "Reveal the QR or copy the link to receive a file.")
         else:
-            direction = ("Scan with your iPhone to get the file or text." if self.qr_visible else
+            direction = ("Scan with your phone to get the file or text." if self.qr_visible else
                          "Reveal the QR or copy the link to share it.")
-        connection = "USB Personal Hotspot" if self.connection_mode.currentIndex() == 1 else "the same Wi-Fi"
+        connection = ("iPhone USB Personal Hotspot" if self.connection_mode.currentData() == "iphone-usb" else
+                      "Android USB tethering" if self.connection_mode.currentData() == "android-usb" else
+                      "the same Wi-Fi")
         self.message.setText(f"{direction} Use {connection}. Install and trust the exported certificate "
                              f"on your phone first. Expires in {seconds // 60}:{seconds % 60:02d}."
                              + (f"\n{self.share.error}" if self.share.error else ""))
 
     def stop_share(self, checked=False, *, completed=False, expired=False):
         received = self.share.received if isinstance(self.share, ReceiveServer) else None
+        digest = self.share.sha256 if self.share else None
+        self.last_digest = digest if completed else None
         if self.share and QApplication.clipboard().text() == self.share.url:
             QApplication.clipboard().clear()
         if self.share:
             self.share.stop()
             self.share = None
         self.link.clear()
-        self.copy.setEnabled(False)
-        self.copy.setText("Copy link")
+        self.copy.setEnabled(bool(self.last_digest))
+        self.copy.setText("Copy SHA-256" if self.last_digest else "Copy link")
         self.stop.setEnabled(False)
         self.reveal.setEnabled(False)
         self.hide_qr()
         self.status.setText(("Received!" if received else "Sent!") if completed else
                             "Link expired" if expired else "Sharing stopped")
-        self.message.setText(f"Saved to {received}" if completed and received else
-                             "Ready for another transfer." if completed else
-                             "Create a new link whenever you're ready.")
+        result = f"Saved to {received}" if completed and received else "Ready for another transfer."
+        if completed and digest:
+            result += f"\nSHA-256: {digest[:32]}\n{digest[32:]}"
+        self.message.setText(result if completed else "Create a new link whenever you're ready.")
 
     def closeEvent(self, event):
         self.ticker.stop()
@@ -677,7 +715,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = DropOnce()
     if "--self-check" in sys.argv:
-        assert window.network is not None and window.inputs.count() == 3
+        assert window.network is not None and window.inputs.count() == 3 and window.connection_mode.count() == 3
         assert not qr_image("https://127.0.0.1:1234/s/example").isNull()
         window.close()
         raise SystemExit(0)
