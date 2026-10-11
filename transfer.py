@@ -5,8 +5,10 @@ from html import escape
 import os
 from pathlib import Path
 import secrets
+import ssl
 import stat
-from threading import Lock, Thread
+import sys
+from threading import BoundedSemaphore, Lock, Thread
 from time import monotonic
 from urllib.parse import parse_qs, quote, urlsplit
 
@@ -17,6 +19,8 @@ MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 MAX_TEXT_BYTES = 64 * 1024
 EXPIRY_SECONDS = 10 * 60
 UPLOAD_READ_TIMEOUT = 30
+CONNECTION_TIMEOUT = 10
+MAX_CONNECTIONS = 16
 
 
 def _page(content):
@@ -36,6 +40,44 @@ def _page(content):
             "border-radius:12px;color:#eff5ff;background:#0e1320}"
             "</style></head><body><main><small>DROPONCE · LOCAL TRANSFER</small>"
             f"{content}</main></body></html>").encode("utf-8")
+
+
+class TransferHTTPServer(ThreadingHTTPServer):
+    """Bound idle sockets and worker threads on the selected local interface."""
+
+    daemon_threads = True
+    request_queue_size = 16
+
+    def __init__(self, *args, **kwargs):
+        self.slots = BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(CONNECTION_TIMEOUT)
+        return connection, address
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ssl.SSLError, TimeoutError, BrokenPipeError,
+                                          ConnectionResetError)):
+            return  # Invalid TLS connections and idle timeouts are expected on a LAN.
+        super().handle_error(request, client_address)
 
 
 class ShareServer:
@@ -79,9 +121,9 @@ class ShareServer:
         self.error = None
         self.stopped = False
         context, self.ca_certificate = tls_context(address)
-        self.httpd = ThreadingHTTPServer((address, 0), self._handler())
-        self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
-        self.httpd.daemon_threads = True
+        self.httpd = TransferHTTPServer((address, 0), self._handler())
+        self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True,
+                                                do_handshake_on_connect=False)
         self.port = self.httpd.server_port
         self.thread = Thread(target=self.httpd.serve_forever, name="drop-once-server", daemon=True)
         self.thread.start()
@@ -270,12 +312,14 @@ class ReceiveServer(ShareServer):
                              "const file=document.getElementById('file').files[0];"
                              "const status=document.getElementById('status');"
                              "if(!file){status.textContent='Choose a file first.';return;}"
+                             "const button=document.getElementById('send');button.disabled=true;"
                              "status.textContent='Sending… Please keep this page open.';"
                              "try{const response=await fetch(location.pathname+'/upload?name='+"
                              "encodeURIComponent(file.name),{method:'PUT',body:file});"
                              "status.textContent=response.ok?'Sent! You can close this page now.':"
-                             "'Could not send. The link may have expired or the file is too large.';}"
-                             "catch(_){status.textContent='Connection lost. Ask for a new link.';}"
+                             "'Could not send. The link may have expired or the file is too large.';"
+                             "if(!response.ok)button.disabled=false;}"
+                             "catch(_){status.textContent='Connection lost. Ask for a new link.';button.disabled=false;}"
                              "};</script>")
                 self.reply(200, body, script_nonce=nonce)
 
@@ -288,7 +332,9 @@ class ReceiveServer(ShareServer):
                     self.reply(410, _page("<h1>This link has expired.</h1>"))
                     return
                 length = self.headers.get("Content-Length", "")
-                if not length.isdecimal():
+                if (self.headers.get("Transfer-Encoding") is not None
+                        or len(self.headers.get_all("Content-Length", [])) != 1
+                        or not length.isascii() or not length.isdecimal() or len(length) > 10):
                     self.reply(411, _page("<h1>Upload length required.</h1>"))
                     return
                 size = int(length)
@@ -315,9 +361,13 @@ class ReceiveServer(ShareServer):
                         filename = name if number == 0 else f"{Path(name).stem}-{number}{Path(name).suffix}"
                         candidate = share.directory / filename
                         try:
-                            output = candidate.open("xb")
+                            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                            if hasattr(os, "O_NOFOLLOW"):
+                                flags |= os.O_NOFOLLOW
+                            fd = os.open(candidate, flags, 0o600)
                         except FileExistsError:
                             continue
+                        output = os.fdopen(fd, "wb")
                         destination = candidate
                         break
                     else:

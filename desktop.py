@@ -399,7 +399,7 @@ class DropOnce(QMainWindow):
             try:
                 cert = x509.load_pem_x509_certificate(certificate.read_bytes())
                 Path(destination).write_bytes(cert.public_bytes(serialization.Encoding.DER))
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Could not export certificate", str(exc))
                 return
             QMessageBox.information(self, "Install on your phone",

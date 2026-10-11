@@ -1,6 +1,8 @@
 from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
+import os
 import socket
+import stat
 import ssl
 import tempfile
 import time
@@ -38,6 +40,16 @@ def connect(share):
 
 
 class TransferTests(unittest.TestCase):
+    def test_idle_non_tls_socket_cannot_block_other_connections(self):
+        with patch("transfer.CONNECTION_TIMEOUT", .2):
+            share = ShareServer("127.0.0.1", text="secure")
+            idle = socket.create_connection(("127.0.0.1", share.port), timeout=2)
+            try:
+                self.assertEqual(get(share, f"/s/{share.token}")[0], 200)
+            finally:
+                idle.close()
+                share.stop()
+
     def test_iphone_browser_can_upload_once_without_overwriting(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
@@ -61,6 +73,8 @@ class TransferTests(unittest.TestCase):
                     connection.close()
                 self.assertEqual(existing.read_bytes(), b"keep original")
                 self.assertEqual((folder / "photo-1.jpg").read_bytes(), b"new photo")
+                if os.name != "nt":
+                    self.assertEqual(stat.S_IMODE((folder / "photo-1.jpg").stat().st_mode), 0o600)
                 self.assertEqual(receive.received, folder / "photo-1.jpg")
                 self.assertEqual(get(receive, link)[0], 410)
             finally:
@@ -83,6 +97,17 @@ class TransferTests(unittest.TestCase):
                         connection.close()
                 self.assertEqual(list(Path(temp).iterdir()), [])
                 self.assertFalse(receive.served)
+                connection = connect(receive)
+                try:
+                    connection.putrequest("PUT", link + "?name=duplicate.bin")
+                    connection.putheader("Content-Length", "0")
+                    connection.putheader("Content-Length", "0")
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 411)
+                    response.read()
+                finally:
+                    connection.close()
                 connection = connect(receive)
                 try:
                     connection.request("PUT", link + "?name=huge.bin", body=b"",
