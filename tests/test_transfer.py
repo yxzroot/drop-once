@@ -106,6 +106,11 @@ class TransferTests(unittest.TestCase):
                 connection.putheader("Content-Length", "5")
                 connection.endheaders()
                 connection.send(b"ab")
+                for _ in range(200):
+                    if receive.in_progress:
+                        break
+                    time.sleep(.01)
+                self.assertTrue(receive.in_progress)
                 connection.sock.shutdown(socket.SHUT_RDWR)
                 connection.close()
                 for _ in range(200):
