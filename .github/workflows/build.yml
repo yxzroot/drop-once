@@ -30,10 +30,14 @@ jobs:
           sudo apt-get install -y libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0
       - name: Install dependencies
         run: python -m pip install -r requirements.txt -r requirements-build.txt
-      - name: Run tests
+      - name: Run transfer tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -p test_transfer.py -v
+      - name: Run desktop tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -p test_desktop.py -v
       - name: Package application
         run: python -m PyInstaller --noconfirm --clean drop-once.spec
       - name: Smoke-test Linux app
