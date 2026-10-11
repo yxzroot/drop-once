@@ -1,0 +1,91 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+      - name: Install Linux Qt libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-build.txt
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -v
+      - name: Package application
+        run: python -m PyInstaller --noconfirm --clean drop-once.spec
+      - name: Smoke-test Linux app
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/DropOnce/DropOnce --self-check
+      - name: Smoke-test Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $app = Start-Process -FilePath .\dist\DropOnce\DropOnce.exe -ArgumentList '--self-check' -Wait -PassThru
+          if ($app.ExitCode -ne 0) { throw "DropOnce exited with code $($app.ExitCode)" }
+      - name: Smoke-test macOS app
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/DropOnce.app/Contents/MacOS/DropOnce --self-check
+      - name: Archive Linux app
+        if: runner.os == 'Linux'
+        run: tar -czf dist/DropOnce-Linux.tar.gz -C dist DropOnce
+      - name: Archive Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/DropOnce -DestinationPath dist/DropOnce-Windows.zip
+      - name: Archive macOS app
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/DropOnce.app dist/DropOnce-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DropOnce-${{ runner.os }}
+          path: |
+            dist/DropOnce-Linux.tar.gz
+            dist/DropOnce-Windows.zip
+            dist/DropOnce-macOS.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: DropOnce-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Publish release downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-artifacts/* --repo "$GITHUB_REPOSITORY" --generate-notes
