@@ -121,6 +121,9 @@ PALETTES = {
     "ocean": dict(bg="#061b2e", card="#0b2a40", field="#082238", text="#eefcff",
                   muted="#a4c9d3", border="#286075", accent="#54e0dd", accent_text="#032532",
                   hover="#164158", badge="#15525a"),
+    "forest": dict(bg="#101c19", card="#1c2d28", field="#172722", text="#edf9f1",
+                   muted="#9dbbaa", border="#385a4e", accent="#9ce0b0", accent_text="#101c19",
+                   hover="#304c43", badge="#263e34"),
 }
 
 
@@ -291,6 +294,7 @@ class DropOnce(QMainWindow):
         self.theme_picker.addItem("Dark", "dark")
         self.theme_picker.addItem("Light", "light")
         self.theme_picker.addItem("Ocean", "ocean")
+        self.theme_picker.addItem("Forest", "forest")
         self.theme_picker.setAccessibleName("Appearance theme")
         self.theme_picker.setToolTip("Choose the appearance of DropOnce")
         self.theme_picker.setCurrentIndex(self.theme_picker.findData(self.theme))

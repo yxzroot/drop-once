@@ -164,6 +164,21 @@ class DesktopTests(unittest.TestCase):
                 self.assertNotIn("$accent", restored.styleSheet())
             finally:
                 restored.close()
+            forest = DropOnce()
+            try:
+                forest.theme_picker.setCurrentIndex(forest.theme_picker.findData("forest"))
+                for color in ("#101c19", "#1c2d28", "#385a4e", "#9ce0b0", "#edf9f1", "#9dbbaa"):
+                    self.assertIn(color, forest.styleSheet())
+                self.assertIn("#9ce0b0", forest.file_mode.styleSheet())
+                self.assertNotIn("$accent", forest.styleSheet())
+            finally:
+                forest.close()
+            restored_forest = DropOnce()
+            try:
+                self.assertEqual(restored_forest.theme, "forest")
+                self.assertEqual(restored_forest.theme_picker.currentData(), "forest")
+            finally:
+                restored_forest.close()
 
     def test_certificate_can_be_exported_before_a_link(self):
         with tempfile.TemporaryDirectory() as temp, \
