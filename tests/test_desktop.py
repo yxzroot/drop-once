@@ -10,10 +10,11 @@ import time
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QAbstractAnimation, QSettings
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
-from desktop import (DropOnce, lan_addresses, masked_address, possible_android_tether,
+from desktop import (APP_VERSION, DropOnce, lan_addresses, masked_address, possible_android_tether,
                      possible_iphone_tether, mullvad_blocks_lan, qr_image)
 
 
@@ -179,6 +180,28 @@ class DesktopTests(unittest.TestCase):
                 self.assertEqual(restored_forest.theme_picker.currentData(), "forest")
             finally:
                 restored_forest.close()
+
+    def test_version_and_one_shot_fade(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("desktop.QSettings", side_effect=lambda *args: QSettings(
+                    str(Path(temp) / "theme.ini"), QSettings.Format.IniFormat)), \
+                patch("desktop.lan_addresses", return_value=[("127.0.0.1", "test")]):
+            window = DropOnce()
+            try:
+                self.assertIn(APP_VERSION, window.windowTitle())
+                window.show()
+                window.set_mode(1)
+                self.assertEqual(window.transition.state(), QAbstractAnimation.State.Running)
+                self.assertLess(window.fade_effect.opacity(), 1)
+                QTest.qWait(750)
+                self.assertEqual(window.transition.state(), QAbstractAnimation.State.Stopped)
+                self.assertEqual(window.fade_effect.opacity(), 1)
+                window.set_mode(1)
+                self.assertEqual(window.transition.state(), QAbstractAnimation.State.Stopped)
+                window.theme_picker.setCurrentIndex(window.theme_picker.findData("forest"))
+                self.assertEqual(window.transition.state(), QAbstractAnimation.State.Running)
+            finally:
+                window.close()
 
     def test_certificate_can_be_exported_before_a_link(self):
         with tempfile.TemporaryDirectory() as temp, \

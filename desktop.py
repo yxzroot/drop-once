@@ -15,15 +15,18 @@ import psutil
 import qrcode
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
                               QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                               QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
 from transfer import ReceiveServer, ShareServer
 import tls_identity
 from tls_identity import tls_context
+
+
+APP_VERSION = "0.5.1-beta.5"
 
 
 def lan_addresses():
@@ -245,6 +248,15 @@ class DropOnce(QMainWindow):
         self.theme = self.theme_picker.currentData()
         self.settings.setValue("theme", self.theme)
         self.apply_theme()
+        self.animate_once()
+
+    def animate_once(self):
+        """Fade in a completed UI change once, rather than animating continuously."""
+        if not self.isVisible():
+            return
+        self.transition.stop()
+        self.fade_effect.setOpacity(0.55)
+        self.transition.start()
 
     def system_theme_changed(self):
         if self.theme == "system":
@@ -262,19 +274,26 @@ class DropOnce(QMainWindow):
             self.theme = "system"
         self.qr_visible = False
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowTitle("DropOnce · One link. One transfer.")
+        self.setWindowTitle(f"DropOnce {APP_VERSION} · One link. One transfer.")
         self.resize(1080, 730)
         self.setMinimumSize(710, 660)
         self.apply_theme()
         root = QWidget()
         self.setCentralWidget(root)
+        self.fade_effect = QGraphicsOpacityEffect(root)
+        root.setGraphicsEffect(self.fade_effect)
+        self.transition = QPropertyAnimation(self.fade_effect, b"opacity", self)
+        self.transition.setDuration(600)
+        self.transition.setStartValue(0.55)
+        self.transition.setEndValue(1.0)
+        self.transition.setEasingCurve(QEasingCurve.Type.OutCubic)
         outer = QVBoxLayout(root)
         outer.setContentsMargins(26, 20, 26, 16)
         outer.setSpacing(14)
         header = QHBoxLayout()
         intro = QVBoxLayout()
         intro.setSpacing(3)
-        eyebrow = QLabel("LOCAL FILE SHARING  /  NO ACCOUNT")
+        eyebrow = QLabel(f"LOCAL FILE SHARING  /  NO ACCOUNT  ·  {APP_VERSION}")
         eyebrow.setObjectName("eyebrow")
         intro.addWidget(eyebrow)
         logo = QLabel("DropOnce.")
@@ -505,6 +524,7 @@ class DropOnce(QMainWindow):
         self.refresh_networks()
 
     def set_mode(self, index):
+        changed = self.inputs.currentIndex() != index
         if self.share and self.inputs.currentIndex() != index:
             self.stop_share()
         self.inputs.setCurrentIndex(index)
@@ -515,6 +535,8 @@ class DropOnce(QMainWindow):
         self.start_button.setText("Create receive link  →" if index == 2 else "Create one-time link  →")
         if index == 2 and not self.share:
             self.message.setText("Choose a folder, then let your phone send one file here.")
+        if changed:
+            self.animate_once()
 
     def show_file(self):
         self.set_mode(0)
