@@ -4,15 +4,17 @@
 import ipaddress
 from http.client import HTTPSConnection
 from pathlib import Path
+import shutil
 import socket
 import ssl
+import subprocess
 import sys
 import tempfile
 
 import psutil
 import qrcode
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
@@ -69,6 +71,22 @@ def masked_address(address):
     """Keep enough context to distinguish adapters without displaying a full IP."""
     parts = address.split(".")
     return f"{parts[0]}.•••.•••.{parts[-1]}" if len(parts) == 4 else "•••"
+
+
+def mullvad_blocks_lan():
+    """Diagnose an unreachable LAN without altering any VPN settings."""
+    if not shutil.which("mullvad"):
+        return False
+    try:
+        status = subprocess.run(["mullvad", "status"], capture_output=True, text=True,
+                                timeout=2, check=False)
+        if status.returncode != 0 or not status.stdout.lstrip().startswith("Connected"):
+            return False
+        result = subprocess.run(["mullvad", "lan", "get"], capture_output=True, text=True,
+                                timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "setting: block" in result.stdout.lower()
 
 
 def qr_image(url, size=260):
@@ -399,7 +417,14 @@ class DropOnce(QMainWindow):
         self.certificate_button = QPushButton("Export phone trust certificate…")
         self.certificate_button.setToolTip("Install and trust this certificate on your phone before using HTTPS")
         self.certificate_button.clicked.connect(self.export_certificate)
-        footer_layout.addWidget(self.certificate_button)
+        cert_row = QHBoxLayout()
+        cert_row.addWidget(self.certificate_button, 1)
+        help_button = QPushButton("?")
+        help_button.setAccessibleName("Troubleshoot phone connection and Firefox certificate")
+        help_button.setToolTip("Phone can't load the page? Check network and certificate setup")
+        help_button.clicked.connect(self.troubleshoot_connection)
+        cert_row.addWidget(help_button)
+        footer_layout.addLayout(cert_row)
         self.start_button = QPushButton("Create one-time link  →")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.start_share)
@@ -550,13 +575,34 @@ class DropOnce(QMainWindow):
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Could not export certificate", str(exc))
                 return
+            fingerprint = cert.fingerprint(hashes.SHA256()).hex().upper()
             QMessageBox.information(self, "Install on your phone",
                                     "Transfer this certificate to your phone through a trusted method. "
                                     "On iPhone, install the profile and enable full trust in Settings → "
                                     "General → About → Certificate Trust Settings. On Android, use "
                                     "Settings → Security → Install a certificate → CA certificate "
                                     "(names vary by phone). Never bypass a certificate warning. "
-                                    "Keep the private key on this computer. See README for details.")
+                                    "Keep the private key on this computer. See README for details.\n\n"
+                                    "Check this certificate's SHA-256 fingerprint on the receiving device:\n"
+                                    + fingerprint[:32] + "\n" + fingerprint[32:])
+
+    def troubleshoot_connection(self):
+        warning = ("Mullvad is currently blocking local network sharing. In Mullvad, enable "
+                   "Local network sharing only if you trust this LAN. Keep the VPN connected.\n\n"
+                   if mullvad_blocks_lan() else "")
+        QMessageBox.information(
+            self, "Phone connection and Firefox help",
+            warning + "1. Put the phone and computer on the same trusted Wi-Fi, or enable USB tethering. "
+            "Guest Wi-Fi and some VPN/firewall settings block local devices. Keep DropOnce open.\n\n"
+            "2. Export the DropOnce CA certificate and transfer it to the phone by a trusted method. "
+            "Install and trust it in iPhone Settings → General → About → Certificate Trust Settings "
+            "or Android Settings → Security → Install a certificate → CA certificate.\n\n"
+            "3. Desktop Firefox: Settings → Privacy & Security → Certificates → View Certificates "
+            "→ Authorities → Import; trust the DropOnce CA for websites. Android Firefox may require "
+            "enabling trust for user-installed CAs; if unavailable, use a browser that trusts the installed CA. "
+            "iPhone Firefox uses iOS certificate trust.\n\n"
+            "Never bypass a certificate warning or install a certificate from the warning page. "
+            "The HTTPS link should load without a warning after setup.")
 
     def select_file(self, filename):
         self.file = Path(filename)
@@ -630,6 +676,13 @@ class DropOnce(QMainWindow):
     def start_share(self):
         address = self.network.currentData()
         if not address:
+            return
+        if mullvad_blocks_lan():
+            QMessageBox.warning(self, "Local network blocked by Mullvad",
+                                "Mullvad currently blocks local network sharing, so your phone cannot "
+                                "open a DropOnce link. On a trusted network, enable Local network "
+                                "sharing in Mullvad while leaving the VPN connected, then try again. "
+                                "You must also install and trust DropOnce's CA certificate on the phone.")
             return
         try:
             if self.inputs.currentIndex() == 0:

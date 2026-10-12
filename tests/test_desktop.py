@@ -4,25 +4,30 @@ from unittest.mock import patch
 from http.client import HTTPSConnection
 from pathlib import Path
 import ssl
+import subprocess
 import tempfile
 import time
 
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QLabel
 
 from desktop import (DropOnce, lan_addresses, masked_address, possible_android_tether,
-                     possible_iphone_tether, qr_image)
+                     possible_iphone_tether, mullvad_blocks_lan, qr_image)
 
 
 def setUpModule():
-    global _tls_directory, _tls_patch
+    global _tls_directory, _tls_patch, _vpn_patch
     _tls_directory = tempfile.TemporaryDirectory()
     _tls_patch = patch("tls_identity.identity_folder", return_value=Path(_tls_directory.name))
     _tls_patch.start()
+    _vpn_patch = patch("desktop.mullvad_blocks_lan", return_value=False)
+    _vpn_patch.start()
 
 
 def tearDownModule():
+    _vpn_patch.stop()
     _tls_patch.stop()
     _tls_directory.cleanup()
 
@@ -86,6 +91,37 @@ class DesktopTests(unittest.TestCase):
                 "other": [interface(socket.AF_INET, "169.254.3.4")]}):
             self.assertEqual(lan_addresses(), [("192.168.1.20", "wifi")])
 
+    def test_mullvad_diagnosis_requires_connected_vpn_and_blocked_lan(self):
+        with patch("desktop.shutil.which", return_value="/usr/bin/mullvad"), \
+                patch("desktop.subprocess.run", side_effect=[
+                    subprocess.CompletedProcess([], 0, "Connected\n", ""),
+                    subprocess.CompletedProcess([], 0, "Local network sharing setting: block\n", "")
+                ]):
+            self.assertTrue(mullvad_blocks_lan())
+        with patch("desktop.shutil.which", return_value="/usr/bin/mullvad"), \
+                patch("desktop.subprocess.run", return_value=subprocess.CompletedProcess(
+                    [], 0, "Disconnected\n", "")) as run:
+            self.assertFalse(mullvad_blocks_lan())
+            run.assert_called_once()
+
+    def test_blocked_lan_warns_instead_of_creating_unreachable_link(self):
+        with patch("desktop.lan_addresses", return_value=[("127.0.0.1", "test")]):
+            window = DropOnce()
+            try:
+                window.set_mode(1)
+                window.text_input.setPlainText("test")
+                with patch("desktop.mullvad_blocks_lan", return_value=True), \
+                        patch("desktop.QMessageBox.warning") as warning:
+                    window.start_share()
+                self.assertIsNone(window.share)
+                self.assertIn("Mullvad", warning.call_args.args[1])
+                with patch("desktop.mullvad_blocks_lan", return_value=True), \
+                        patch("desktop.QMessageBox.information") as info:
+                    window.troubleshoot_connection()
+                self.assertIn("Firefox", info.call_args.args[2])
+            finally:
+                window.close()
+
     def test_iphone_usb_network_hints_are_only_hints(self):
         self.assertTrue(possible_iphone_tether("172.20.10.2", "en7"))
         self.assertTrue(possible_iphone_tether("192.168.0.2", "Apple Mobile Device Ethernet"))
@@ -136,10 +172,12 @@ class DesktopTests(unittest.TestCase):
             try:
                 destination = Path(temp) / "DropOnce-CA.cer"
                 with patch("desktop.QFileDialog.getSaveFileName", return_value=(str(destination), "")), \
-                        patch("desktop.QMessageBox.information"):
+                        patch("desktop.QMessageBox.information") as notice:
                     window.export_certificate()
                 cert = x509.load_der_x509_certificate(destination.read_bytes())
                 self.assertTrue(cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
+                self.assertIn(cert.fingerprint(hashes.SHA256()).hex().upper()[:32],
+                              notice.call_args.args[2])
                 self.assertIsNone(window.share)
             finally:
                 window.close()
