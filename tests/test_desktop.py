@@ -14,7 +14,7 @@ from PySide6.QtCore import QAbstractAnimation, QSettings
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
-from desktop import (APP_VERSION, DropOnce, lan_addresses, masked_address, possible_android_tether,
+from desktop import (APP_VERSION, DropOnce, configure_qt_platform, lan_addresses, masked_address, possible_android_tether,
                      possible_iphone_tether, mullvad_blocks_lan, qr_image)
 
 
@@ -37,6 +37,22 @@ class DesktopTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_hyprland_prefers_xwayland_without_overriding_a_requested_backend(self):
+        environment = {"HYPRLAND_INSTANCE_SIGNATURE": "session", "DISPLAY": ":0",
+                       "WAYLAND_DISPLAY": "wayland-1"}
+        configure_qt_platform(environment, "linux")
+        self.assertEqual(environment["QT_QPA_PLATFORM"], "xcb")
+        environment["QT_QPA_PLATFORM"] = "wayland"
+        configure_qt_platform(environment, "linux")
+        self.assertEqual(environment["QT_QPA_PLATFORM"], "wayland")
+        for key, platform in (("DISPLAY", "linux"), ("HYPRLAND_INSTANCE_SIGNATURE", "linux"),
+                              ("WAYLAND_DISPLAY", "linux"), (None, "darwin")):
+            other = {name: value for name, value in environment.items() if name != "QT_QPA_PLATFORM"}
+            if key:
+                other.pop(key)
+            configure_qt_platform(other, platform)
+            self.assertNotIn("QT_QPA_PLATFORM", other)
 
     def test_qr_and_local_share_from_gui(self):
         with patch("desktop.lan_addresses", return_value=[("127.0.0.1", "test")]):

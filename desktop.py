@@ -3,6 +3,7 @@
 
 import ipaddress
 from http.client import HTTPSConnection
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -10,6 +11,16 @@ import ssl
 import subprocess
 import sys
 import tempfile
+
+
+def configure_qt_platform(environment, platform):
+    """Avoid Qt Wayland windows closing unexpectedly on Hyprland when XWayland is available."""
+    if (platform.startswith("linux") and environment.get("HYPRLAND_INSTANCE_SIGNATURE")
+            and environment.get("DISPLAY") and environment.get("WAYLAND_DISPLAY")):
+        environment.setdefault("QT_QPA_PLATFORM", "xcb")
+
+
+configure_qt_platform(os.environ, sys.platform)
 
 import psutil
 import qrcode
@@ -26,7 +37,7 @@ import tls_identity
 from tls_identity import tls_context
 
 
-APP_VERSION = "0.5.1-beta.5"
+APP_VERSION = "0.5.1-beta.6"
 
 
 def lan_addresses():
