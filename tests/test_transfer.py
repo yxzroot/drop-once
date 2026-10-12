@@ -1,5 +1,6 @@
 from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
 import socket
@@ -11,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from transfer import ReceiveServer, ShareServer
+from tls_identity import tls_context
 
 
 def setUpModule():
@@ -41,6 +43,21 @@ def connect(share):
 
 
 class TransferTests(unittest.TestCase):
+    def test_concurrent_certificate_creation_and_recovery(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("tls_identity.identity_folder", return_value=Path(temp) / "tls"):
+            with ThreadPoolExecutor(max_workers=6) as workers:
+                identities = list(workers.map(tls_context, ["127.0.0.1"] * 6))
+            cert = identities[0][1]
+            self.assertTrue(all(path == cert for _, path in identities))
+            self.assertTrue(all(context.minimum_version == ssl.TLSVersion.TLSv1_2
+                                for context, _ in identities))
+            first_key = (cert.parent / "root-key.pem").read_bytes()
+            cert.unlink()  # Simulate an interruption between writing the private key and public cert.
+            _, recovered = tls_context("127.0.0.1")
+            self.assertEqual((cert.parent / "root-key.pem").read_bytes(), first_key)
+            self.assertTrue(recovered.is_file())
+
     def test_idle_non_tls_socket_cannot_block_other_connections(self):
         with patch("transfer.CONNECTION_TIMEOUT", .2):
             share = ShareServer("127.0.0.1", text="secure")
@@ -256,6 +273,33 @@ class TransferTests(unittest.TestCase):
             self.assertIn(b"&lt;script&gt;", body)
             self.assertNotIn(b"<script>", body)
             self.assertEqual(get(share, link)[0], 410)
+        finally:
+            share.stop()
+
+    def test_disconnected_text_view_can_be_retried(self):
+        share = ShareServer("127.0.0.1", text="please retry")
+        try:
+            handler = share.httpd.RequestHandlerClass
+            original_reply = handler.reply
+            failed = False
+
+            def disconnect_once(request, code, body, *args, **kwargs):
+                nonlocal failed
+                if code == 200 and not failed:
+                    failed = True
+                    raise BrokenPipeError("recipient disconnected")
+                return original_reply(request, code, body, *args, **kwargs)
+
+            with patch.object(handler, "reply", disconnect_once):
+                with self.assertRaises(OSError):
+                    get(share, f"/s/{share.token}")
+                for _ in range(30):
+                    if not share.in_progress:
+                        break
+                    time.sleep(.01)
+                self.assertFalse(share.in_progress)
+                self.assertFalse(share.served)
+                self.assertEqual(get(share, f"/s/{share.token}")[0], 200)
         finally:
             share.stop()
 

@@ -2,9 +2,12 @@
 """DropOnce — send or receive one file over a local network."""
 
 import ipaddress
+from http.client import HTTPSConnection
 from pathlib import Path
 import socket
+import ssl
 import sys
+import tempfile
 
 import psutil
 import qrcode
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHB
                               QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
 from transfer import ReceiveServer, ShareServer
+import tls_identity
 from tls_identity import tls_context
 
 
@@ -711,13 +715,40 @@ class DropOnce(QMainWindow):
         super().closeEvent(event)
 
 
+def packaged_self_check():
+    """Exercise the frozen Qt app, certificate generation and an authenticated transfer."""
+    with tempfile.TemporaryDirectory() as temp:
+        original = tls_identity.identity_folder
+        tls_identity.identity_folder = lambda: Path(temp) / "tls"
+        share = None
+        connection = None
+        try:
+            share = ShareServer("127.0.0.1", text="DropOnce self-check")
+            context = ssl.create_default_context(cafile=str(share.ca_certificate))
+            connection = HTTPSConnection("127.0.0.1", share.port, context=context, timeout=10)
+            connection.request("GET", f"/s/{share.token}")
+            response = connection.getresponse()
+            assert response.status == 200 and b"DropOnce self-check" in response.read()
+        finally:
+            if connection:
+                connection.close()
+            if share:
+                share.stop()
+            tls_identity.identity_folder = original
+    window = DropOnce()
+    try:
+        assert window.network is not None and window.inputs.count() == 3
+        assert window.connection_mode.count() == 3
+        assert not qr_image("https://127.0.0.1:1234/s/example").isNull()
+    finally:
+        window.close()
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = DropOnce()
     if "--self-check" in sys.argv:
-        assert window.network is not None and window.inputs.count() == 3 and window.connection_mode.count() == 3
-        assert not qr_image("https://127.0.0.1:1234/s/example").isNull()
-        window.close()
+        packaged_self_check()
         raise SystemExit(0)
+    window = DropOnce()
     window.show()
     raise SystemExit(app.exec())

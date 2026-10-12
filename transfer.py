@@ -201,7 +201,13 @@ class ShareServer:
                         return
                     body = _page("<h1>Shared text</h1><p>Select and copy the text below.</p>"
                                  f"<pre>{escape(share.text)}</pre><p>This was a one-time view.</p>")
-                    share._finish(self.reply(200, body))
+                    successful = False
+                    try:
+                        successful = self.reply(200, body)
+                    except OSError as exc:
+                        share.error = str(exc)
+                    finally:
+                        share._finish(successful)
                     return
                 if location == expected:
                     filename = escape(share.file.name)

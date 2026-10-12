@@ -6,6 +6,7 @@ from pathlib import Path
 import ssl
 import stat
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
@@ -46,17 +47,45 @@ def _check_private(path):
         raise ValueError(f"Unsafe permissions on TLS private key: {path}")
 
 
-def tls_context(address):
-    """Return an HTTPS server context and the local CA certificate path."""
-    ip = ipaddress.ip_address(address)
-    directory = identity_folder()
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if directory.is_symlink() or (os.name != "nt" and stat.S_IMODE(directory.stat().st_mode) & 0o077):
-        raise ValueError("TLS identity folder must be private and cannot be a symlink")
+@contextmanager
+def _identity_lock(directory):
+    """Serialize identity creation between app windows, including separate processes."""
+    lockfile = directory / ".identity.lock"
+    if lockfile.is_symlink():
+        raise ValueError("TLS identity lock cannot be a symlink")
+    fd = os.open(lockfile, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        _check_private(lockfile)
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _tls_context_locked(directory, ip):
     root_key = directory / "root-key.pem"
     root_cert = directory / "root-cert.pem"
-    if not root_key.exists() and not root_cert.exists():
-        key = ec.generate_private_key(ec.SECP256R1())
+    if root_cert.exists() and not root_key.exists():
+        raise ValueError("DropOnce CA private key is missing; restore a backup or set up a new phone certificate")
+    if not root_cert.exists():
+        if root_key.exists():
+            _check_private(root_key)
+            key = serialization.load_pem_private_key(root_key.read_bytes(), password=None)
+        else:
+            key = ec.generate_private_key(ec.SECP256R1())
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "DropOnce local transfer CA")])
         now = datetime.now(timezone.utc)
         cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
@@ -70,7 +99,8 @@ def tls_context(address):
                                              key_agreement=False, key_cert_sign=True, crl_sign=True,
                                              encipher_only=False, decipher_only=False), critical=True)
                 .sign(key, hashes.SHA256()))
-        _save_private(root_key, _key_bytes(key))
+        if not root_key.exists():
+            _save_private(root_key, _key_bytes(key))
         _save_private(root_cert, _cert_bytes(cert))
     _check_private(root_key)
     key = serialization.load_pem_private_key(root_key.read_bytes(), password=None)
@@ -118,3 +148,14 @@ def tls_context(address):
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(leaf_cert_path), str(leaf_key_path))
     return context, root_cert
+
+
+def tls_context(address):
+    """Return an HTTPS server context and the local CA certificate path."""
+    ip = ipaddress.ip_address(address)
+    directory = identity_folder()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.is_symlink() or (os.name != "nt" and stat.S_IMODE(directory.stat().st_mode) & 0o077):
+        raise ValueError("TLS identity folder must be private and cannot be a symlink")
+    with _identity_lock(directory):
+        return _tls_context_locked(directory, ip)
