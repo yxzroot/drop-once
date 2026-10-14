@@ -197,6 +197,29 @@ class DesktopTests(unittest.TestCase):
             finally:
                 restored_forest.close()
 
+    def test_new_themes_are_listed_and_render_complete_palettes(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("desktop.QSettings", side_effect=lambda *args: QSettings(
+                    str(Path(temp) / "theme.ini"), QSettings.Format.IniFormat)), \
+                patch("desktop.lan_addresses", return_value=[("127.0.0.1", "test")]):
+            window = DropOnce()
+            try:
+                expected = {
+                    "lavender": ("#171326", "#241d3b", "#c5a5ff"),
+                    "sunset": ("#241311", "#34201c", "#ffb36b"),
+                    "midnight": ("#080b14", "#111827", "#73b7ff"),
+                }
+                for theme, colors in expected.items():
+                    self.assertNotEqual(window.theme_picker.findData(theme), -1)
+                    window.theme_picker.setCurrentIndex(window.theme_picker.findData(theme))
+                    self.assertEqual(window.theme, theme)
+                    self.assertEqual(window.theme_picker.currentData(), theme)
+                    for color in colors:
+                        self.assertIn(color, window.styleSheet())
+                    self.assertNotIn("$accent", window.styleSheet())
+            finally:
+                window.close()
+
     def test_version_and_one_shot_fade(self):
         with tempfile.TemporaryDirectory() as temp, \
                 patch("desktop.QSettings", side_effect=lambda *args: QSettings(

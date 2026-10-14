@@ -12,7 +12,7 @@ Download the archive for your computer from the [latest release](https://github.
 
 **Screen privacy:** DropOnce masks parts of the IP address and token in the window, and keeps the QR hidden until you click **Show QR code** (it hides again after 45 seconds). The copied link and the revealed QR **must contain the complete address and token** so the other device can connect. Masking the screen does not hide your local address from the recipient or other devices on your network. The clipboard is cleared when a share stops, but another app may have read it before then.
 
-Choose **System**, **Dark**, **Light**, or **Ocean** in the appearance selector at the top. Your choice is saved for the next launch.
+Choose **System**, **Dark**, **Light**, **Ocean**, **Forest**, **Lavender**, **Sunset**, or **Midnight** in the appearance selector at the top. Your choice is saved for the next launch.
 
 ## Android over a USB cable
 

@@ -138,6 +138,15 @@ PALETTES = {
     "forest": dict(bg="#101c19", card="#1c2d28", field="#172722", text="#edf9f1",
                    muted="#9dbbaa", border="#385a4e", accent="#9ce0b0", accent_text="#101c19",
                    hover="#304c43", badge="#263e34"),
+    "lavender": dict(bg="#171326", card="#241d3b", field="#1c1730", text="#f6f0ff",
+                     muted="#c1b5d9", border="#50466f", accent="#c5a5ff", accent_text="#201531",
+                     hover="#352c50", badge="#33274f"),
+    "sunset": dict(bg="#241311", card="#34201c", field="#2b1714", text="#fff4ed",
+                   muted="#e4bcb0", border="#70483d", accent="#ffb36b", accent_text="#321a0d",
+                   hover="#4a2c25", badge="#503027"),
+    "midnight": dict(bg="#080b14", card="#111827", field="#0c1220", text="#f1f5ff",
+                     muted="#a8b3cc", border="#2c3d5b", accent="#73b7ff", accent_text="#071426",
+                     hover="#1c2b46", badge="#182946"),
 }
 
 
@@ -325,6 +334,9 @@ class DropOnce(QMainWindow):
         self.theme_picker.addItem("Light", "light")
         self.theme_picker.addItem("Ocean", "ocean")
         self.theme_picker.addItem("Forest", "forest")
+        self.theme_picker.addItem("Lavender", "lavender")
+        self.theme_picker.addItem("Sunset", "sunset")
+        self.theme_picker.addItem("Midnight", "midnight")
         self.theme_picker.setAccessibleName("Appearance theme")
         self.theme_picker.setToolTip("Choose the appearance of DropOnce")
         self.theme_picker.setCurrentIndex(self.theme_picker.findData(self.theme))
